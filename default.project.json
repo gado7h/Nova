@@ -1,0 +1,16 @@
+{
+  "name": "nova",
+  "emitLegacyScripts": false,
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "Machine": {
+        "$path": "src/machine"
+      },
+      "Net": {
+        "$path": "src/server"
+      }
+    }
+  }
+}

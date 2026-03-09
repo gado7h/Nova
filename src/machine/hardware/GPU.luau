@@ -1,0 +1,474 @@
+-- NovaMachine/hardware/GPU.lua
+-- NovaGFX-400 — Virtual GPU with EditableImage rendering.
+--
+-- Two modes:
+--   TEXT  (default): 80×25 character grid, 4×8 bitmap font, 16 CGA colours
+--   PIXEL:           320×200 direct ARGB framebuffer
+--
+-- GPU:flush() is called by the Motherboard heartbeat (~20×/sec).
+-- Uses WritePixelsBuffer (native buffer API) for maximum throughput —
+-- avoids per-frame Lua table allocation that WritePixels(table) requires.
+--
+-- IMPORTANT: The EditableImage passed in must be exactly 320×200.
+-- Any other size causes WritePixelsBuffer to write to the wrong region.
+
+local GPU = {}
+GPU.__index = GPU
+
+-- CGA 16-color palette (packed ARGB as Lua integer)
+local PALETTE = {
+	[0] = 0xFF000000, -- black
+	[1] = 0xFF0000AA, -- blue
+	[2] = 0xFF00AA00, -- green
+	[3] = 0xFF00AAAA, -- cyan
+	[4] = 0xFFAA0000, -- red
+	[5] = 0xFFAA00AA, -- magenta
+	[6] = 0xFFAA5500, -- brown
+	[7] = 0xFFAAAAAA, -- light gray
+	[8] = 0xFF555555, -- dark gray
+	[9] = 0xFF5555FF, -- bright blue
+	[10] = 0xFF55FF55, -- bright green
+	[11] = 0xFF55FFFF, -- bright cyan
+	[12] = 0xFFFF5555, -- bright red
+	[13] = 0xFFFF55FF, -- bright magenta
+	[14] = 0xFFFFFF55, -- yellow
+	[15] = 0xFFFFFFFF, -- white
+}
+
+-- 4×8 bitmap font (ASCII 32-126).
+-- Each glyph is 8 bytes; each byte is one scanline with bits 3..0 = columns 0..3.
+local FONT = {}
+local function F(...)
+	return { ... }
+end
+local _GLYPHS = {
+	[32] = F(0, 0, 0, 0, 0, 0, 0, 0), -- space
+	[33] = F(4, 4, 4, 4, 0, 4, 0, 0), -- !
+	[34] = F(10, 10, 0, 0, 0, 0, 0, 0), -- "
+	[35] = F(10, 10, 15, 10, 15, 10, 10, 0), -- #
+	[36] = F(4, 7, 8, 6, 1, 14, 4, 0), -- $
+	[37] = F(9, 1, 2, 4, 8, 9, 0, 0), -- %
+	[38] = F(4, 10, 10, 4, 11, 9, 6, 0), -- &
+	[39] = F(4, 4, 0, 0, 0, 0, 0, 0), -- '
+	[40] = F(2, 4, 8, 8, 8, 4, 2, 0), -- (
+	[41] = F(8, 4, 2, 2, 2, 4, 8, 0), -- )
+	[42] = F(0, 4, 14, 4, 14, 4, 0, 0), -- *
+	[43] = F(0, 4, 4, 15, 4, 4, 0, 0), -- +
+	[44] = F(0, 0, 0, 0, 4, 4, 8, 0), -- ,
+	[45] = F(0, 0, 0, 15, 0, 0, 0, 0), -- -
+	[46] = F(0, 0, 0, 0, 0, 6, 6, 0), -- .
+	[47] = F(1, 1, 2, 4, 8, 8, 0, 0), -- /
+	[48] = F(6, 9, 11, 13, 9, 6, 0, 0), -- 0
+	[49] = F(4, 6, 4, 4, 4, 14, 0, 0), -- 1
+	[50] = F(6, 9, 1, 2, 4, 15, 0, 0), -- 2
+	[51] = F(6, 9, 2, 1, 9, 6, 0, 0), -- 3
+	[52] = F(2, 6, 10, 15, 2, 2, 0, 0), -- 4
+	[53] = F(15, 8, 14, 1, 9, 6, 0, 0), -- 5
+	[54] = F(3, 4, 14, 9, 9, 6, 0, 0), -- 6
+	[55] = F(15, 1, 2, 4, 4, 4, 0, 0), -- 7
+	[56] = F(6, 9, 6, 9, 9, 6, 0, 0), -- 8
+	[57] = F(6, 9, 7, 1, 2, 12, 0, 0), -- 9
+	[58] = F(0, 6, 6, 0, 6, 6, 0, 0), -- :
+	[59] = F(0, 6, 6, 0, 6, 6, 4, 0), -- ;
+	[60] = F(2, 4, 8, 4, 2, 0, 0, 0), -- <
+	[61] = F(0, 15, 0, 15, 0, 0, 0, 0), -- =
+	[62] = F(8, 4, 2, 4, 8, 0, 0, 0), -- >
+	[63] = F(6, 9, 1, 2, 0, 2, 0, 0), -- ?
+	[64] = F(6, 9, 11, 13, 8, 6, 0, 0), -- @
+	[65] = F(6, 9, 15, 9, 9, 9, 0, 0), -- A
+	[66] = F(14, 9, 14, 9, 9, 14, 0, 0), -- B
+	[67] = F(6, 9, 8, 8, 9, 6, 0, 0), -- C
+	[68] = F(14, 9, 9, 9, 9, 14, 0, 0), -- D
+	[69] = F(15, 8, 14, 8, 8, 15, 0, 0), -- E
+	[70] = F(15, 8, 14, 8, 8, 8, 0, 0), -- F
+	[71] = F(6, 9, 8, 11, 9, 7, 0, 0), -- G
+	[72] = F(9, 9, 15, 9, 9, 9, 0, 0), -- H
+	[73] = F(14, 4, 4, 4, 4, 14, 0, 0), -- I
+	[74] = F(7, 2, 2, 2, 10, 4, 0, 0), -- J
+	[75] = F(9, 10, 12, 10, 9, 9, 0, 0), -- K
+	[76] = F(8, 8, 8, 8, 8, 15, 0, 0), -- L
+	[77] = F(9, 15, 15, 9, 9, 9, 0, 0), -- M
+	[78] = F(9, 13, 11, 9, 9, 9, 0, 0), -- N
+	[79] = F(6, 9, 9, 9, 9, 6, 0, 0), -- O
+	[80] = F(14, 9, 14, 8, 8, 8, 0, 0), -- P
+	[81] = F(6, 9, 9, 11, 9, 7, 0, 0), -- Q
+	[82] = F(14, 9, 14, 10, 9, 9, 0, 0), -- R
+	[83] = F(7, 8, 6, 1, 9, 6, 0, 0), -- S
+	[84] = F(15, 4, 4, 4, 4, 4, 0, 0), -- T
+	[85] = F(9, 9, 9, 9, 9, 6, 0, 0), -- U
+	[86] = F(9, 9, 9, 9, 6, 4, 0, 0), -- V
+	[87] = F(9, 9, 9, 15, 15, 9, 0, 0), -- W
+	[88] = F(9, 9, 6, 6, 9, 9, 0, 0), -- X
+	[89] = F(9, 9, 6, 4, 4, 4, 0, 0), -- Y
+	[90] = F(15, 1, 2, 4, 8, 15, 0, 0), -- Z
+	[91] = F(6, 4, 4, 4, 4, 6, 0, 0), -- [
+	[92] = F(8, 8, 4, 2, 1, 1, 0, 0), -- backslash
+	[93] = F(6, 2, 2, 2, 2, 6, 0, 0), -- ]
+	[94] = F(4, 10, 0, 0, 0, 0, 0, 0), -- ^
+	[95] = F(0, 0, 0, 0, 0, 0, 15, 0), -- _
+	[96] = F(8, 4, 0, 0, 0, 0, 0, 0), -- `
+	[97] = F(0, 0, 6, 1, 7, 7, 0, 0), -- a
+	[98] = F(8, 8, 14, 9, 9, 14, 0, 0), -- b
+	[99] = F(0, 0, 6, 8, 8, 6, 0, 0), -- c
+	[100] = F(1, 1, 7, 9, 9, 7, 0, 0), -- d
+	[101] = F(0, 0, 6, 15, 8, 6, 0, 0), -- e
+	[102] = F(3, 4, 14, 4, 4, 4, 0, 0), -- f
+	[103] = F(0, 0, 7, 9, 7, 1, 6, 0), -- g
+	[104] = F(8, 8, 14, 9, 9, 9, 0, 0), -- h
+	[105] = F(4, 0, 4, 4, 4, 6, 0, 0), -- i
+	[106] = F(2, 0, 2, 2, 10, 4, 0, 0), -- j
+	[107] = F(8, 8, 9, 14, 9, 9, 0, 0), -- k
+	[108] = F(6, 4, 4, 4, 4, 6, 0, 0), -- l
+	[109] = F(0, 0, 15, 15, 9, 9, 0, 0), -- m
+	[110] = F(0, 0, 14, 9, 9, 9, 0, 0), -- n
+	[111] = F(0, 0, 6, 9, 9, 6, 0, 0), -- o
+	[112] = F(0, 0, 14, 9, 14, 8, 8, 0), -- p
+	[113] = F(0, 0, 7, 9, 7, 1, 1, 0), -- q
+	[114] = F(0, 0, 11, 12, 8, 8, 0, 0), -- r
+	[115] = F(0, 0, 6, 4, 2, 14, 0, 0), -- s
+	[116] = F(4, 4, 14, 4, 4, 3, 0, 0), -- t
+	[117] = F(0, 0, 9, 9, 9, 7, 0, 0), -- u
+	[118] = F(0, 0, 9, 9, 6, 4, 0, 0), -- v
+	[119] = F(0, 0, 9, 15, 15, 6, 0, 0), -- w
+	[120] = F(0, 0, 9, 6, 6, 9, 0, 0), -- x
+	[121] = F(0, 0, 9, 7, 1, 6, 0, 0), -- y
+	[122] = F(0, 0, 15, 2, 4, 15, 0, 0), -- z
+	[123] = F(3, 4, 4, 8, 4, 4, 3, 0), -- {
+	[124] = F(4, 4, 4, 4, 4, 4, 0, 0), -- |
+	[125] = F(12, 2, 2, 1, 2, 2, 12, 0), -- }
+	[126] = F(0, 0, 5, 10, 0, 0, 0, 0), -- ~
+}
+for k, v in pairs(_GLYPHS) do
+	FONT[k] = v
+end
+
+local GLYPH_DEFAULT = F(15, 9, 9, 9, 9, 15, 0, 0)
+local function getGlyph(ch)
+	return FONT[ch] or GLYPH_DEFAULT
+end
+
+-- ────────────────────────────────────────────────────────
+function GPU.new(config, editableImage)
+	local self = setmetatable({}, GPU)
+	self.config = config
+	self.editableImage = editableImage -- nil = headless/test mode
+
+	self.W = config.SCREEN_W
+	self.H = config.SCREEN_H
+	self.CW = config.CHAR_W
+	self.CH = config.CHAR_H
+
+	self.GW = config.GLYPH_W or self.CW
+	self.GH = config.GLYPH_H or self.CH
+	self.PX = config.PAD_X or 0
+	self.PY = config.PAD_Y or 0
+
+	self.mode = "TEXT"
+
+	-- Text buffer: flat array [0 .. COLS*ROWS-1], each entry {char, attr}
+	self._textBuf = {}
+	for i = 0, config.TEXT_COLS * config.TEXT_ROWS - 1 do
+		self._textBuf[i] = { char = 32, attr = 0x07 }
+	end
+	self._cursorRow = 0
+	self._cursorCol = 0
+	self._cursorVisible = true
+
+	-- Pixel framebuffer: flat array [0 .. W*H-1] of packed ARGB integers
+	self._framebuf = {}
+	for i = 0, self.W * self.H - 1 do
+		self._framebuf[i] = 0xFF000000
+	end
+
+	-- Native buffer for WritePixelsBuffer — allocated once, reused every frame.
+	-- Layout: RGBA u8 bytes, row-major. Size = W * H * 4 bytes.
+	self._pixelBuffer = buffer.create(self.W * self.H * 4)
+
+	-- VRAM (bus-mapped region, written by CPU via memWrite)
+	self._vram = {}
+	self._dirty = true
+
+	self.stats = { flushes = 0, textWrites = 0, pixelWrites = 0 }
+
+	return self
+end
+
+-- ────────────────────────────────────────────────────────
+--  Bus / VRAM interface
+-- ────────────────────────────────────────────────────────
+
+function GPU:memRead(offset)
+	return self._vram[offset] or 0
+end
+
+function GPU:memWrite(offset, value)
+	self._vram[offset] = value % 256
+	self._dirty = true
+
+	if self.mode == "TEXT" then
+		local cellIdx = math.floor(offset / 2)
+		if self._textBuf[cellIdx] then
+			if offset % 2 == 0 then
+				self._textBuf[cellIdx].char = value % 256
+			else
+				self._textBuf[cellIdx].attr = value % 256
+			end
+		end
+	else
+		-- Pixel mode: 4 bytes per pixel (A R G B at offsets 0 1 2 3)
+		local pixIdx = math.floor(offset / 4)
+		local comp = offset % 4
+		local cur = self._framebuf[pixIdx] or 0xFF000000
+		if comp == 0 then
+			self._framebuf[pixIdx] = bit32.bor(bit32.band(cur, 0x00FFFFFF), value * 16777216)
+		elseif comp == 1 then
+			self._framebuf[pixIdx] = bit32.bor(bit32.band(cur, 0xFF00FFFF), value * 65536)
+		elseif comp == 2 then
+			self._framebuf[pixIdx] = bit32.bor(bit32.band(cur, 0xFFFF00FF), value * 256)
+		else
+			self._framebuf[pixIdx] = bit32.bor(bit32.band(cur, 0xFFFFFF00), value)
+		end
+	end
+end
+
+-- ────────────────────────────────────────────────────────
+--  High-level text API  (called by BIOS / kernel / shell)
+-- ────────────────────────────────────────────────────────
+
+function GPU:setMode(mode)
+	self.mode = mode
+	self._dirty = true
+	if mode == "TEXT" then
+		self:clearScreen()
+	end
+end
+
+function GPU:clearScreen(attr)
+	attr = attr or 0x07
+	for i = 0, self.config.TEXT_COLS * self.config.TEXT_ROWS - 1 do
+		self._textBuf[i] = { char = 32, attr = attr }
+	end
+	self._cursorRow = 0
+	self._cursorCol = 0
+	self._dirty = true
+end
+
+function GPU:putChar(col, row, ch, attr)
+	if col < 0 or col >= self.config.TEXT_COLS then
+		return
+	end
+	if row < 0 or row >= self.config.TEXT_ROWS then
+		return
+	end
+	local idx = row * self.config.TEXT_COLS + col
+	self._textBuf[idx] = {
+		char = (type(ch) == "string") and string.byte(ch, 1) or ch,
+		attr = attr or 0x07,
+	}
+	self._dirty = true
+	self.stats.textWrites = self.stats.textWrites + 1
+end
+
+function GPU:writeString(col, row, str, attr)
+	for i = 1, #str do
+		self:putChar(col + i - 1, row, string.byte(str, i), attr)
+	end
+end
+
+function GPU:print(str, attr)
+	attr = attr or 0x07
+	for i = 1, #str do
+		local c = string.byte(str, i)
+		if c == 10 then
+			self._cursorCol = 0
+			self._cursorRow = self._cursorRow + 1
+		elseif c == 13 then
+			self._cursorCol = 0
+		elseif c == 8 then
+			if self._cursorCol > 0 then
+				self._cursorCol = self._cursorCol - 1
+				self:putChar(self._cursorCol, self._cursorRow, 32, attr)
+			end
+		else
+			self:putChar(self._cursorCol, self._cursorRow, c, attr)
+			self._cursorCol = self._cursorCol + 1
+			if self._cursorCol >= self.config.TEXT_COLS then
+				self._cursorCol = 0
+				self._cursorRow = self._cursorRow + 1
+			end
+		end
+		if self._cursorRow >= self.config.TEXT_ROWS then
+			self:_scrollUp()
+			self._cursorRow = self.config.TEXT_ROWS - 1
+		end
+	end
+	self._dirty = true
+end
+
+function GPU:println(str, attr)
+	self:print(str .. "\n", attr)
+end
+
+function GPU:_scrollUp()
+	local cols = self.config.TEXT_COLS
+	local rows = self.config.TEXT_ROWS
+	for row = 0, rows - 2 do
+		for col = 0, cols - 1 do
+			self._textBuf[row * cols + col] = self._textBuf[(row + 1) * cols + col] or { char = 32, attr = 0x07 }
+		end
+	end
+	for col = 0, cols - 1 do
+		self._textBuf[(rows - 1) * cols + col] = { char = 32, attr = 0x07 }
+	end
+end
+
+function GPU:moveCursor(col, row)
+	self._cursorCol = math.max(0, math.min(col, self.config.TEXT_COLS - 1))
+	self._cursorRow = math.max(0, math.min(row, self.config.TEXT_ROWS - 1))
+end
+
+function GPU:getCursor()
+	return self._cursorCol, self._cursorRow
+end
+
+function GPU:toggleCursor()
+	self._cursorVisible = not self._cursorVisible
+	self._dirty = true
+end
+
+-- ────────────────────────────────────────────────────────
+--  Pixel API
+-- ────────────────────────────────────────────────────────
+
+function GPU:setPixel(x, y, argb)
+	if x < 0 or x >= self.W or y < 0 or y >= self.H then
+		return
+	end
+	self._framebuf[y * self.W + x] = argb
+	self._dirty = true
+	self.stats.pixelWrites = self.stats.pixelWrites + 1
+end
+
+function GPU:fillRect(x, y, w, h, argb)
+	for row = y, y + h - 1 do
+		for col = x, x + w - 1 do
+			self:setPixel(col, row, argb)
+		end
+	end
+end
+
+function GPU:drawChar(x, y, ch, fgARGB, bgARGB)
+	local code = (type(ch) == "string") and string.byte(ch, 1) or ch
+	local glyph = getGlyph(code)
+
+	-- Clear full cell first so deletes / narrow glyphs / underscore do not leave artifacts
+	for row = 0, self.CH - 1 do
+		for col = 0, self.CW - 1 do
+			self:setPixel(x + col, y + row, bgARGB)
+		end
+	end
+
+	-- Draw glyph inside padded cell
+	for row = 0, self.GH - 1 do
+		local bits = glyph[row + 1] or 0
+		for col = 0, self.GW - 1 do
+			local mask = 2 ^ ((self.GW - 1) - col)
+			if (bits % (mask * 2)) >= mask then
+				local px = x + self.PX + col
+				local py = y + self.PY + row
+				if px >= x and px < x + self.CW and py >= y and py < y + self.CH then
+					self:setPixel(px, py, fgARGB)
+				end
+			end
+		end
+	end
+end
+
+-- ────────────────────────────────────────────────────────
+--  Flush to EditableImage via WritePixelsBuffer
+--
+--  WritePixelsBuffer takes a native Luau buffer (RGBA u8, row-major).
+--  This is ~10× faster than WritePixels(table) because it avoids
+--  allocating and iterating a 64k-entry Lua table on every frame.
+-- ────────────────────────────────────────────────────────
+
+function GPU:flush()
+	if not self._dirty then
+		return
+	end
+	if not self.editableImage then
+		self._dirty = false
+		return
+	end
+
+	if self.mode == "TEXT" then
+		self:_renderText()
+	end
+
+	self.stats.flushes = self.stats.flushes + 1
+
+	local fb = self._framebuf
+	local pb = self._pixelBuffer
+	local W = self.W
+	local H = self.H
+
+	-- Ensure buffer is the right size (handles reboot/resize edge cases)
+	local needed = W * H * 4
+	if buffer.len(pb) ~= needed then
+		pb = buffer.create(needed)
+		self._pixelBuffer = pb
+	end
+
+	-- Pack ARGB integer → RGBA bytes into native buffer
+	for i = 0, W * H - 1 do
+		local argb = fb[i] or 0xFF000000
+		local base = i * 4
+		-- Arithmetic unpack (avoids bit32 overhead in tight loop)
+		local a = math.floor(argb / 16777216) % 256
+		local r = math.floor(argb / 65536) % 256
+		local g = math.floor(argb / 256) % 256
+		local b = argb % 256
+		buffer.writeu8(pb, base, r)
+		buffer.writeu8(pb, base + 1, g)
+		buffer.writeu8(pb, base + 2, b)
+		buffer.writeu8(pb, base + 3, a)
+	end
+
+	local ok, err = pcall(function()
+		self.editableImage:WritePixelsBuffer(Vector2.zero, Vector2.new(W, H), pb)
+	end)
+	if not ok then
+		warn("GPU:flush WritePixelsBuffer failed:", err)
+	end
+
+	self._dirty = false
+end
+
+function GPU:_renderText()
+	local cols = self.config.TEXT_COLS
+	local rows = self.config.TEXT_ROWS
+
+	for row = 0, rows - 1 do
+		for col = 0, cols - 1 do
+			local cell = self._textBuf[row * cols + col] or { char = 32, attr = 0x07 }
+			local fg = PALETTE[cell.attr % 16] or 0xFFAAAAAA
+			local bg = PALETTE[math.floor(cell.attr / 16) % 16] or 0xFF000000
+			self:drawChar(col * self.CW, row * self.CH, cell.char, fg, bg)
+		end
+	end
+
+	if self._cursorVisible then
+		local cx = self._cursorCol * self.CW
+		local cy = self._cursorRow * self.CH + (self.CH - 1)
+		for i = 0, self.CW - 1 do
+			self:setPixel(cx + i, cy, 0xFFAAAAAA)
+		end
+	end
+end
+
+function GPU:getStats()
+	return self.stats
+end
+GPU.PALETTE = PALETTE
+
+return GPU
