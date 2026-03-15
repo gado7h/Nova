@@ -43,7 +43,7 @@
 
 ### LuauVM
 
-`LuauVM/*` bundles compiler+Base64 runtime support for executing Luau payloads without FiU VM shim.
+`LuauVM/*` bundles compiler+Base64 runtime support for executing Luau payloads with FiU-backed bytecode execution.
 
 ## Data Flow Summary
 

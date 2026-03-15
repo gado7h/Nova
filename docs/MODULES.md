@@ -56,6 +56,7 @@
 
 - `src/machine/LuauVM/init.luau` - public VM API (compiler+Base64 backed loader).
 - `src/machine/LuauVM/Compiler.luau` - compiler implementation.
+- `src/machine/LuauVM/Fiu.luau` - VM execution engine.
 - `src/machine/LuauVM/Base64.luau` - bytecode encode/decode helper.
 
 

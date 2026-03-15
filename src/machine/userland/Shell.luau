@@ -554,6 +554,7 @@ function Shell:_makeRuntimeEnv(args, parsed)
 	local stdinData = self._pipeInput
 
 	local sandbox = {}
+	sandbox.__nova_cpu = (self.kernel.machine and self.kernel.machine.cpu) or nil
 
 	-- Standard I/O
 	sandbox.print = function(...)
