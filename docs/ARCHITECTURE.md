@@ -28,7 +28,6 @@
 
 - `RuntimeController` advances boot stages (BIOS -> BOOT -> KERNEL -> RUNNING).
 - Instantiates firmware/bootloader/kernel modules once hardware is ready.
-- Exposes host-side IDE activation against the running kernel runtime.
 
 ### Firmware + Boot
 
@@ -48,7 +47,6 @@
 - `Init` performs first-process startup tasks.
 - `Shell` implements command loop/UI interactions.
 - `PackageManager` and `PackageDB` track and resolve installed packages.
-- IDE runtime replaces the former desktop launcher to encourage user-created GUI systems.
 
 ### LuauVM
 

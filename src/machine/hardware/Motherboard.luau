@@ -161,13 +161,6 @@ function Motherboard:reboot()
 end
 
 
-function Motherboard:activateIDE(path)
-	if not self.runtime then
-		return false, "runtime not initialized"
-	end
-	return self.runtime:activateIDE(path)
-end
-
 function Motherboard:_setBootStage(stage)
 	self._bootStage = stage
 end
