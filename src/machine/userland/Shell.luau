@@ -1889,7 +1889,7 @@ function Shell:_buildBuiltins()
 		return 0
 	end
 
-	-- nano / vi (minimal text editor)
+	-- nano / vi (full-screen text editor)
 	B["nano"] = function(args)
 		if not args[2] then
 			outln("usage: nano <file>", 0x0C)
@@ -1897,9 +1897,11 @@ function Shell:_buildBuiltins()
 		end
 
 		local path = absPath(args[2])
+		local fileName = args[2]
+		local ext = fileName:match("%.([%w_%-]+)$") or ""
+		local isLuau = (ext == "luau") or (ext == "lua")
 		local content = vfs():readFileStr(path) or ""
 		local lines = {}
-
 		for l in (content .. "\n"):gmatch("([^\n]*)\n") do
 			table.insert(lines, l)
 		end
@@ -1907,26 +1909,439 @@ function Shell:_buildBuiltins()
 			lines = { "" }
 		end
 
-		self.gpu:clearScreen()
-		outln(" GNU nano  (NovaOS edition)  File: " .. args[2], 0x0B)
-		outln(string.rep("-", self.config.TEXT_COLS), 0x08)
+		local cols = self.config.TEXT_COLS
+		local rows = self.config.TEXT_ROWS
+		local topRow = 1
+		local bodyRows = rows - 5
+		local gutter = 6
 
-		for i, l in ipairs(lines) do
-			if i > self.config.TEXT_ROWS - 4 then
-				break
-			end
-			outln(l)
+		local cursorRow, cursorCol = 1, 0
+		local scrollRow = 1
+		local modified = false
+		local status = ""
+		local statusAttr = 0x07
+		local clipboard = {}
+		local lastSearch = ""
+		local pendingExit = false
+		local miniPrompt = nil
+
+		local luauKeywords = {
+			["and"] = true,
+			["break"] = true,
+			["do"] = true,
+			["else"] = true,
+			["elseif"] = true,
+			["end"] = true,
+			["false"] = true,
+			["for"] = true,
+			["function"] = true,
+			["if"] = true,
+			["in"] = true,
+			["local"] = true,
+			["nil"] = true,
+			["not"] = true,
+			["or"] = true,
+			["repeat"] = true,
+			["return"] = true,
+			["then"] = true,
+			["true"] = true,
+			["until"] = true,
+			["while"] = true,
+			["continue"] = true,
+			["type"] = true,
+			["typeof"] = true,
+			["export"] = true,
+		}
+		local luauBuiltins = {
+			["string"] = true,
+			["table"] = true,
+			["math"] = true,
+			["task"] = true,
+			["pairs"] = true,
+			["ipairs"] = true,
+			["pcall"] = true,
+			["require"] = true,
+			["workspace"] = true,
+			["game"] = true,
+		}
+
+		local CTRL_G = string.char(7)
+		local CTRL_K = string.char(11)
+		local CTRL_L = string.char(12)
+		local CTRL_O = string.char(15)
+		local CTRL_R = string.char(18)
+		local CTRL_U = string.char(21)
+		local CTRL_W = string.char(23)
+		local CTRL_X = string.char(24)
+
+		local function setStatus(msg, attr)
+			status = msg or ""
+			statusAttr = attr or 0x07
 		end
 
-		outln(string.rep("-", self.config.TEXT_COLS), 0x08)
-		outln(" Ctrl+X or Esc to exit", 0x08)
+		local function ensureLine()
+			if cursorRow < 1 then
+				cursorRow = 1
+			end
+			if cursorRow > #lines then
+				cursorRow = #lines
+			end
+			local line = lines[cursorRow] or ""
+			if cursorCol < 0 then
+				cursorCol = 0
+			end
+			if cursorCol > #line then
+				cursorCol = #line
+			end
+		end
+
+		local function writeAt(col, row, str, attr)
+			for i = 1, #str do
+				self.gpu:putChar(col + i - 1, row, string.byte(str, i), attr)
+			end
+		end
+
+		local function clearRow(row, attr)
+			for col = 0, cols - 1 do
+				self.gpu:putChar(col, row, 32, attr)
+			end
+		end
+
+		local function tokenizeLuau(line)
+			local tokens = {}
+			local i = 1
+			while i <= #line do
+				local c = line:sub(i, i)
+				local n = line:sub(i + 1, i + 1)
+				if c == "-" and n == "-" then
+					table.insert(tokens, { text = line:sub(i), attr = 0x02 })
+					break
+				elseif c == '"' or c == "'" then
+					local q = c
+					local j = i + 1
+					while j <= #line do
+						if line:sub(j, j) == "\\" then
+							j = j + 2
+						elseif line:sub(j, j) == q then
+							j = j + 1
+							break
+						else
+							j = j + 1
+						end
+					end
+					table.insert(tokens, { text = line:sub(i, j - 1), attr = 0x0E })
+					i = j
+				elseif c:match("[%a_]") then
+					local j = i + 1
+					while j <= #line and line:sub(j, j):match("[%w_]") do
+						j = j + 1
+					end
+					local word = line:sub(i, j - 1)
+					local attr = 0x0F
+					if luauKeywords[word] then
+						attr = 0x0D
+					elseif luauBuiltins[word] then
+						attr = 0x09
+					end
+					table.insert(tokens, { text = word, attr = attr })
+					i = j
+				elseif c:match("%d") then
+					local j = i + 1
+					while j <= #line and line:sub(j, j):match("[%d%.]") do
+						j = j + 1
+					end
+					table.insert(tokens, { text = line:sub(i, j - 1), attr = 0x0B })
+					i = j
+				elseif c == "." or c:match("[%+%-%*%/%=<>~%#%%%^]") then
+					table.insert(tokens, { text = c, attr = 0x0C })
+					i = i + 1
+				else
+					table.insert(tokens, { text = c, attr = 0x0F })
+					i = i + 1
+				end
+			end
+			return tokens
+		end
+
+		local function saveFile()
+			local text = table.concat(lines, "\n")
+			vfs():writeFileStr(path, text)
+			modified = false
+			pendingExit = false
+			setStatus(string.format("[ Wrote %d lines ]", #lines), 0x0A)
+		end
+
+		local function startMiniPrompt(label, initial, onSubmit)
+			miniPrompt = {
+				label = label,
+				text = initial or "",
+				onSubmit = onSubmit,
+			}
+		end
+
+		local function findNext(term)
+			if term == "" then
+				setStatus("[ Empty search ]", 0x0E)
+				return
+			end
+			lastSearch = term
+			for r = cursorRow, #lines do
+				local startCol = (r == cursorRow) and (cursorCol + 2) or 1
+				local s, _ = (lines[r] or ""):find(term, startCol, true)
+				if s then
+					cursorRow = r
+					cursorCol = s - 1
+					setStatus("[ Found ]", 0x0A)
+					return
+				end
+			end
+			for r = 1, cursorRow do
+				local stopCol = (r == cursorRow) and (cursorCol + 1) or nil
+				local hay = lines[r] or ""
+				local s = hay:find(term, 1, true)
+				if s and (not stopCol or s < stopCol) then
+					cursorRow = r
+					cursorCol = s - 1
+					setStatus("[ Found ]", 0x0A)
+					return
+				end
+			end
+			setStatus("[ Not found ]", 0x0C)
+		end
+
+		local function drawShortcuts(row, left, right)
+			clearRow(row, 0x03)
+			writeAt(0, row, left:sub(1, cols), 0x03)
+			if #left < cols then
+				writeAt(math.min(cols - 1, #left + 2), row, right:sub(1, cols), 0x03)
+			end
+		end
+
+		local function render()
+			ensureLine()
+			if cursorRow < scrollRow then
+				scrollRow = cursorRow
+			elseif cursorRow >= scrollRow + bodyRows then
+				scrollRow = cursorRow - bodyRows + 1
+			end
+			if scrollRow < 1 then
+				scrollRow = 1
+			end
+
+			clearRow(0, 0x0F)
+			local modifiedLabel = modified and "Modified" or ""
+			local header = string.format(" GNU nano 6.2                File: %s", fileName)
+			writeAt(0, 0, header:sub(1, cols), 0x0F)
+			if modifiedLabel ~= "" and #modifiedLabel < cols then
+				writeAt(cols - #modifiedLabel, 0, modifiedLabel, 0x0F)
+			end
+
+			for r = 0, bodyRows - 1 do
+				local row = topRow + r
+				local lineIndex = scrollRow + r
+				clearRow(row, 0x00)
+				if lineIndex <= #lines then
+					writeAt(0, row, string.format("%4d ", lineIndex), 0x08)
+					local line = lines[lineIndex] or ""
+					if isLuau then
+						local col = gutter
+						for _, token in ipairs(tokenizeLuau(line)) do
+							if col >= cols then
+								break
+							end
+							local text = token.text
+							if col + #text > cols then
+								text = text:sub(1, cols - col)
+							end
+							if #text > 0 then
+								writeAt(col, row, text, token.attr)
+								col = col + #text
+							end
+						end
+					else
+						writeAt(gutter, row, line:sub(1, cols - gutter), 0x0F)
+					end
+				end
+			end
+
+			clearRow(rows - 4, 0x07)
+			local meta = string.format("[%d lines]  Ln %d, Col %d", #lines, cursorRow, cursorCol + 1)
+			if miniPrompt then
+				meta = miniPrompt.label .. miniPrompt.text
+			elseif status ~= "" then
+				writeAt(0, rows - 4, status:sub(1, cols), statusAttr)
+			else
+				writeAt(0, rows - 4, meta:sub(1, cols), 0x07)
+			end
+			if miniPrompt then
+				writeAt(0, rows - 4, meta:sub(1, cols), 0x07)
+			end
+
+			drawShortcuts(rows - 3, "^G Help  ^O Write Out  ^R Read File", "^W Where Is  ^\\ Replace")
+			drawShortcuts(rows - 2, "^X Exit  ^K Cut Line   ^U Uncut Text", "^J Justify  ^C Cur Pos")
+			drawShortcuts(rows - 1, "^T To Spell  ^_ Go To Line", "")
+
+			local cRow = topRow + (cursorRow - scrollRow)
+			local cCol = gutter + cursorCol
+			if cRow < topRow then
+				cRow = topRow
+			elseif cRow >= topRow + bodyRows then
+				cRow = topRow + bodyRows - 1
+			end
+			if cCol >= cols then
+				cCol = cols - 1
+			end
+			self.gpu:moveCursor(cCol, cRow)
+		end
+
+		local function handleMiniPrompt(ch)
+			if not miniPrompt then
+				return false
+			end
+			if ch == "\n" or ch == "\r" then
+				local value = miniPrompt.text
+				local submit = miniPrompt.onSubmit
+				miniPrompt = nil
+				if submit then
+					submit(value)
+				end
+				return true
+			elseif ch == "\27" then
+				miniPrompt = nil
+				setStatus("[ Cancelled ]", 0x0E)
+				return true
+			elseif ch == "\b" then
+				miniPrompt.text = miniPrompt.text:sub(1, -2)
+				return true
+			elseif #ch == 1 and string.byte(ch) >= 32 and string.byte(ch) <= 126 then
+				miniPrompt.text = miniPrompt.text .. ch
+				return true
+			end
+			return false
+		end
 
 		local function handleInput(ch)
-			if ch == "\24" or ch == "\27" then
-				self:endForeground()
+			if handleMiniPrompt(ch) then
+				render()
+				return
 			end
+
+			if ch == CTRL_X then
+				if modified and not pendingExit then
+					pendingExit = true
+					setStatus("[ Unsaved changes. Press Ctrl+X again to exit ]", 0x0E)
+					render()
+					return
+				end
+				self.gpu:clearScreen()
+				self:endForeground()
+				return
+			elseif ch == CTRL_O then
+				saveFile()
+			elseif ch == CTRL_G then
+				setStatus("Nano keys: ^O save, ^X exit, ^W search, ^K cut, ^U paste", 0x0B)
+			elseif ch == CTRL_W then
+				startMiniPrompt("Search: ", lastSearch, findNext)
+			elseif ch == CTRL_R then
+				setStatus("[ Read File not implemented yet ]", 0x0E)
+			elseif ch == CTRL_K then
+				clipboard = { lines[cursorRow] or "" }
+				table.remove(lines, cursorRow)
+				if #lines == 0 then
+					lines = { "" }
+				end
+				if cursorRow > #lines then
+					cursorRow = #lines
+				end
+				cursorCol = 0
+				modified = true
+				setStatus("[ Cut 1 line ]", 0x0A)
+			elseif ch == CTRL_U then
+				if #clipboard > 0 then
+					for i = #clipboard, 1, -1 do
+						table.insert(lines, cursorRow, clipboard[i])
+					end
+					modified = true
+					setStatus(string.format("[ Pasted %d line(s) ]", #clipboard), 0x0A)
+				else
+					setStatus("[ Cutbuffer is empty ]", 0x0E)
+				end
+			elseif ch == CTRL_L then
+				setStatus("", 0x07)
+			elseif ch == "[UP]" then
+				cursorRow = cursorRow - 1
+			elseif ch == "[DOWN]" then
+				cursorRow = cursorRow + 1
+			elseif ch == "[LEFT]" then
+				if cursorCol > 0 then
+					cursorCol = cursorCol - 1
+				elseif cursorRow > 1 then
+					cursorRow = cursorRow - 1
+					cursorCol = #(lines[cursorRow] or "")
+				end
+			elseif ch == "[RIGHT]" then
+				local line = lines[cursorRow] or ""
+				if cursorCol < #line then
+					cursorCol = cursorCol + 1
+				elseif cursorRow < #lines then
+					cursorRow = cursorRow + 1
+					cursorCol = 0
+				end
+			elseif ch == "[HOME]" then
+				cursorCol = 0
+			elseif ch == "[END]" then
+				cursorCol = #(lines[cursorRow] or "")
+			elseif ch == "\n" or ch == "\r" then
+				local line = lines[cursorRow] or ""
+				lines[cursorRow] = line:sub(1, cursorCol)
+				table.insert(lines, cursorRow + 1, line:sub(cursorCol + 1))
+				cursorRow = cursorRow + 1
+				cursorCol = 0
+				modified = true
+			elseif ch == "\b" then
+				if cursorCol > 0 then
+					local line = lines[cursorRow] or ""
+					lines[cursorRow] = line:sub(1, cursorCol - 1) .. line:sub(cursorCol + 1)
+					cursorCol = cursorCol - 1
+					modified = true
+				elseif cursorRow > 1 then
+					local prev = lines[cursorRow - 1] or ""
+					lines[cursorRow - 1] = prev .. (lines[cursorRow] or "")
+					table.remove(lines, cursorRow)
+					cursorRow = cursorRow - 1
+					cursorCol = #prev
+					modified = true
+				end
+			elseif ch == "[DEL]" then
+				local line = lines[cursorRow] or ""
+				if cursorCol < #line then
+					lines[cursorRow] = line:sub(1, cursorCol) .. line:sub(cursorCol + 2)
+					modified = true
+				elseif cursorRow < #lines then
+					lines[cursorRow] = line .. (lines[cursorRow + 1] or "")
+					table.remove(lines, cursorRow + 1)
+					modified = true
+				end
+			elseif ch == "\t" then
+				local line = lines[cursorRow] or ""
+				lines[cursorRow] = line:sub(1, cursorCol) .. "	" .. line:sub(cursorCol + 1)
+				cursorCol = cursorCol + 1
+				modified = true
+			elseif #ch == 1 and string.byte(ch) >= 32 and string.byte(ch) <= 126 then
+				local line = lines[cursorRow] or ""
+				lines[cursorRow] = line:sub(1, cursorCol) .. ch .. line:sub(cursorCol + 1)
+				cursorCol = cursorCol + 1
+				modified = true
+			end
+
+			pendingExit = false
+			ensureLine()
+			render()
 		end
 
+		setStatus("^G Help  ^O Write Out  ^X Exit", 0x08)
+		self.gpu:clearScreen()
+		render()
 		local ok, err = self:beginForeground("nano", handleInput)
 		if not ok then
 			outln("nano: " .. tostring(err), 0x0C)
