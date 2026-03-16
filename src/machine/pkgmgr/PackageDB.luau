@@ -1110,7 +1110,9 @@ local function finish()
 		return
 	end
 	ended = true
-	process.endForeground()
+	if process and type(process.endForeground) == "function" then
+		process.endForeground()
+	end
 end
 
 local function rot(vx, vy, vz, ax, ay)
@@ -1167,22 +1169,31 @@ local function cleanup()
 	tty.writeln("cube: done", tty and tty.color and tty.color(10,0) or nil)
 end
 
-local ok, err = process.beginForeground("cube", function(ch)
-	if ch == "\3" then
-		running = false
-		finish()
-	end
-end, cleanup)
+local foregroundSupported = process and type(process.beginForeground) == "function" and type(process.endForeground) == "function"
+if foregroundSupported then
+	local ok, err = process.beginForeground("cube", function(ch)
+		if ch == "\3" then
+			running = false
+			finish()
+		end
+	end, cleanup)
 
-if not ok then
-	tty.writeln("cube: " .. tostring(err), tty and tty.color and tty.color(12,0) or nil)
-	cleanup()
-	return 1
+	if not ok then
+		tty.writeln("cube: " .. tostring(err), tty and tty.color and tty.color(12,0) or nil)
+		cleanup()
+		return 1
+	end
+else
+	tty.writeln("cube: foreground API unavailable; auto-running demo", tty and tty.color and tty.color(14,0) or nil)
 end
 
 local function tick()
 	if not running or frame >= maxFrames then
-		finish()
+		if foregroundSupported then
+			finish()
+		else
+			cleanup()
+		end
 		return
 	end
 	drawFrame()
