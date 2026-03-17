@@ -1,7 +1,29 @@
 -- Shell module
 
+local CommandDispatcher = require(script.Parent.CommandDispatcher)
+local ExecutableLoader = require(script.Parent.ExecutableLoader)
+
 local Shell = {}
 Shell.__index = Shell
+
+local function getVmConfig(config)
+	local vm = config and config.VM or {}
+	return {
+		enabled = vm.ENABLED == true,
+		pragma = vm.PRAGMA or "--!vm",
+		extension = vm.EXTENSION or ".luau",
+	}
+end
+
+local function firstMeaningfulLine(text)
+	for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+		local trimmed = line:match("^%s*(.-)%s*$")
+		if trimmed ~= "" then
+			return trimmed
+		end
+	end
+	return nil
+end
 
 function Shell.new(kernel, username)
 	local self = setmetatable({}, Shell)
@@ -47,7 +69,85 @@ function Shell.new(kernel, username)
 		["..."] = "cd ../..",
 	}
 	self._builtins = self:_buildBuiltins()
+	self._loader = ExecutableLoader.new(self.vfs, self.config)
+	self._dispatcher = CommandDispatcher.new({
+		resolveExternal = function(cmd)
+			return self:_resolveExecutablePath(cmd)
+		end,
+	})
+	self._dispatcher:setBuiltins(self._builtins)
 	return self
+end
+
+function Shell:_getVmConfig()
+	return getVmConfig(self.config)
+end
+
+function Shell:_pathDirs()
+	local dirs = {}
+	local rawPath = tostring((self.env and self.env.PATH) or "")
+	for dir in rawPath:gmatch("([^:]+)") do
+		if dir ~= "" then
+			table.insert(dirs, dir)
+		end
+	end
+	if #dirs == 0 then
+		return { "/bin", "/usr/bin", "/usr/local/bin", "/pkg/bin" }
+	end
+	return dirs
+end
+
+function Shell:_isVMFile(path, content)
+	local vm = self:_getVmConfig()
+	if not path or path:sub(-#vm.extension) ~= vm.extension then
+		return false
+	end
+	return firstMeaningfulLine(content or "") == vm.pragma
+end
+
+function Shell:_resolveExecutablePath(cmd)
+	local vm = self:_getVmConfig()
+	local function isExecutableFile(path)
+		if not self.vfs:exists(path) then
+			return false
+		end
+		local st = self.vfs:stat(path)
+		return st ~= nil and not st.isDir
+	end
+
+	local candidates = {}
+	if cmd:sub(1, 1) == "/" then
+		table.insert(candidates, cmd)
+		table.insert(candidates, cmd .. vm.extension)
+	else
+		for _, dir in ipairs(self:_pathDirs()) do
+			table.insert(candidates, dir .. "/" .. cmd)
+			table.insert(candidates, dir .. "/" .. cmd .. vm.extension)
+		end
+	end
+
+	for _, candidate in ipairs(candidates) do
+		if isExecutableFile(candidate) then
+			return candidate
+		end
+	end
+	return nil
+end
+
+function Shell:_classifyCommand(cmd)
+	return self._dispatcher:classify(cmd)
+end
+
+function Shell:_dispatchParsedCommand(parsed)
+	local spec = self:_classifyCommand(parsed.cmd)
+	if spec.kind == "builtin" then
+		return spec.handler(parsed.args, parsed) or 0
+	end
+	if spec.kind == "external" then
+		return self:_runExternal(spec.path, parsed.args, parsed) or 127
+	end
+	self.gpu:println("nsh: " .. tostring(parsed.cmd) .. ": command not found", 0x0C)
+	return 127
 end
 
 --  Start
@@ -191,6 +291,14 @@ function Shell:_tabComplete()
 		return
 	end
 	local completions = {}
+	local seen = {}
+	local function addCompletion(name)
+		if name == "" or seen[name] then
+			return
+		end
+		seen[name] = true
+		table.insert(completions, name)
+	end
 	if lastWord:find("/") or lastWord:sub(1, 1) == "." or lastWord:sub(1, 1) == "~" then
 		local expanded = lastWord:gsub("^~", self.env.HOME or "/home/" .. self.username)
 		local dir, prefix
@@ -205,28 +313,39 @@ function Shell:_tabComplete()
 		if entries then
 			for _, e in ipairs(entries) do
 				if e.name:sub(1, #prefix) == prefix then
-					table.insert(completions, e.name .. (e.isDir and "/" or ""))
+					addCompletion(e.name .. (e.isDir and "/" or ""))
 				end
 			end
 		end
 	else
+		local vmCfg = self:_getVmConfig()
 		for name in pairs(self._builtins) do
 			if name:sub(1, #lastWord) == lastWord then
-				table.insert(completions, name)
+				addCompletion(name)
 			end
 		end
-		for _, dir in ipairs({ "/bin", "/usr/bin", "/pkg/bin" }) do
+		for _, dir in ipairs(self:_pathDirs()) do
 			local entries = self.vfs:listDir(dir)
 			if entries then
 				for _, e in ipairs(entries) do
-					if e.name:sub(1, #lastWord) == lastWord then
-						table.insert(completions, e.name)
+					if e.isDir then
+						continue
+					end
+					local name = e.name
+					if name:sub(1, #lastWord) == lastWord then
+						addCompletion(name)
+					end
+					if vmCfg.extension ~= "" and name:sub(-#vmCfg.extension) == vmCfg.extension then
+						local base = name:sub(1, #name - #vmCfg.extension)
+						if base ~= "" and base:sub(1, #lastWord) == lastWord then
+							addCompletion(base)
+						end
 					end
 				end
 			end
 		end
-		table.sort(completions)
 	end
+	table.sort(completions)
 	if #completions == 1 then
 		local suffix = completions[1]:sub(#lastWord + 1)
 		for i = 1, #suffix do
@@ -408,8 +527,6 @@ function Shell:_executeCommand(cmdStr)
 		return 0
 	end
 
-	local cmd, args = parsed.cmd, parsed.args
-
 	local savedPrint, outLines
 	if parsed.redirectOut or parsed.redirectAppend then
 		outLines = {}
@@ -425,12 +542,7 @@ function Shell:_executeCommand(cmdStr)
 		end
 	end
 
-	local builtin = self._builtins[cmd]
-	if builtin then
-		self.exitCode = builtin(args, parsed) or 0
-	else
-		self.exitCode = self:_execFromPath(cmd, args, parsed) or 127
-	end
+	self.exitCode = self:_dispatchParsedCommand(parsed)
 
 	if savedPrint then
 		self.gpu.print = savedPrint.print
@@ -451,7 +563,7 @@ end
 
 function Shell:_executePipeline(stages)
 	local output = nil
-	for i, stage in ipairs(stages) do
+	for _, stage in ipairs(stages) do
 		local parsed = self:_parseCommand(stage)
 		if not parsed then
 			break
@@ -469,12 +581,7 @@ function Shell:_executePipeline(stages)
 		if output then
 			self._pipeInput = output
 		end
-		local builtin = self._builtins[parsed.cmd]
-		if builtin then
-			self.exitCode = builtin(parsed.args, parsed) or 0
-		else
-			self.exitCode = self:_execFromPath(parsed.cmd, parsed.args, parsed) or 127
-		end
+		self.exitCode = self:_dispatchParsedCommand(parsed)
 		self._pipeInput = nil
 		self.gpu.print = savedP
 		self.gpu.println = savedPL
@@ -486,44 +593,65 @@ function Shell:_executePipeline(stages)
 end
 
 function Shell:_execFromPath(cmd, args, parsed)
-	-- Search PATH
-	for _, dir in ipairs({ "/bin", "/usr/bin", "/usr/local/bin", "/pkg/bin" }) do
-		local path = dir .. "/" .. cmd
-		if self.vfs:exists(path) then
-			return self:_runScript(path, args, parsed)
-		end
-	end
-	-- Absolute path
-	if cmd:sub(1, 1) == "/" and self.vfs:exists(cmd) then
-		return self:_runScript(cmd, args, parsed)
+	local path = self:_resolveExecutablePath(cmd)
+	if path then
+		return self:_runScript(path, args, parsed)
 	end
 	self.gpu:println("nsh: " .. cmd .. ": command not found", 0x0C)
 	return 127
 end
 
---  LuauVM script execution
-function Shell:_runScript(path, args, parsed)
-	local content, err = self.vfs:readFileStr(path)
-	if not content then
+function Shell:_runExternal(path, args, parsed)
+	local spec, err = self._loader:load(path)
+	if not spec then
 		self.gpu:println("nsh: cannot read " .. path .. ": " .. tostring(err), 0x0C)
 		return 126
 	end
 
-	local vm = self.luauvm
-	if not vm then
-		self.gpu:println("nsh: LuauVM unavailable", 0x0C)
+	local vmCfg = self:_getVmConfig()
+	if spec.kind == "plain" then
+		self.gpu:println("nsh: " .. path .. ": not an executable guest file", 0x0C)
+		return 126
+	end
+
+	if spec.kind == "native" then
+		self.gpu:println("nsh: " .. path .. ": native guest binaries are not implemented yet", 0x0C)
+		return 126
+	end
+
+	if not vmCfg.enabled then
+		self.gpu:println("nsh: guest VM execution is disabled in config", 0x0C)
 		return 1
 	end
 
-	local runtimeEnv = self:_makeRuntimeEnv(args, parsed)
+	local cpu = self.kernel.machine and self.kernel.machine.cpu
+	if not cpu or type(cpu.executeGuestExecutable) ~= "function" then
+		self.gpu:println("nsh: CPU guest execution backend unavailable", 0x0C)
+		return 1
+	end
 
-	local ok, func = pcall(function()
-		return vm(content, false, runtimeEnv)
+	local execContext = cpu:createExecutionContext({
+		pid = self.kernel.pm and self.kernel.pm._currentPid or 0,
+		argv = args or {},
+		env = self.env,
+		executable = {
+			path = spec.path,
+			kind = spec.kind,
+			format = spec.format,
+			runtime = spec.runtime,
+			cpuBackend = spec.cpuBackend,
+		},
+		backend = spec.backend or "auto",
+	})
+	local runtimeEnv = self:_makeRuntimeEnv(args, parsed, execContext)
+
+	local ok, func, loadErr = pcall(function()
+		return cpu:executeGuestExecutable(spec, runtimeEnv, execContext)
 	end)
 
 	if not ok or not func then
-		self.gpu:println("nsh: compile error in " .. path, 0x0C)
-		self.gpu:println(tostring(func), 0x0C)
+		self.gpu:println("nsh: failed to load " .. path, 0x0C)
+		self.gpu:println(tostring(loadErr or func), 0x0C)
 		return 1
 	end
 
@@ -543,8 +671,10 @@ function Shell:_runScript(path, args, parsed)
 	return type(result) == "number" and result or 0
 end
 
+Shell._runScript = Shell._runExternal
+
 --  Process runtime environment (given to every script)
-function Shell:_makeRuntimeEnv(args, parsed)
+function Shell:_makeRuntimeEnv(args, parsed, execContext)
 	local vfs = self.vfs
 	local gpu = self.gpu
 	local kernel = self.kernel
@@ -554,7 +684,7 @@ function Shell:_makeRuntimeEnv(args, parsed)
 	local stdinData = self._pipeInput
 
 	local sandbox = {}
-	sandbox.__nova_cpu = (self.kernel.machine and self.kernel.machine.cpu) or nil
+	sandbox.__nova_exec_ctx = execContext
 
 	-- Standard I/O
 	sandbox.print = function(...)
@@ -713,6 +843,8 @@ function Shell:_makeRuntimeEnv(args, parsed)
 	-- Process API
 	sandbox.process = {
 		pid = self.kernel.pm and self.kernel.pm._currentPid or 0,
+		_pipeInput = self._pipeInput,
+		execContext = execContext,
 
 		exit = function(code)
 			if shell:isForegroundBusy() then
@@ -820,13 +952,13 @@ function Shell:_makeRuntimeEnv(args, parsed)
 		or nil
 
 	-- LuauVM re-exposed so scripts can compile/run sub-scripts
-	if self.luauvm then
+	if self.luauvm and self:_getVmConfig().enabled then
 		sandbox.luauvm = {
 			compile = function(src)
 				return self.luauvm.compile(src)
 			end,
 			load = function(src, isPureBytecode)
-				local f, c = self.luauvm(src, isPureBytecode, sandbox)
+				local f, c = self.luauvm(src, isPureBytecode, sandbox, execContext)
 				return f, c
 			end,
 		}
@@ -860,6 +992,7 @@ function Shell:_buildBuiltins()
 	local outln = function(s, a)
 		self.gpu:println(tostring(s), a)
 	end
+	local vmCfg = self:_getVmConfig()
 
 	local function absPath(p)
 		if not p or p == "" then
@@ -1648,18 +1781,39 @@ function Shell:_buildBuiltins()
 		if not args[2] then
 			return 1
 		end
-		if self._builtins[args[2]] then
+		local spec = self:_classifyCommand(args[2])
+		if spec.kind == "builtin" then
 			outln(args[2] .. ": shell built-in")
 			return 0
 		end
-		for _, dir in ipairs({ "/bin", "/usr/bin", "/usr/local/bin", "/pkg/bin" }) do
-			if vfs():exists(dir .. "/" .. args[2]) then
-				outln(dir .. "/" .. args[2])
-				return 0
-			end
+		if spec.kind == "external" then
+			outln(spec.path)
+			return 0
 		end
 		outln(args[2] .. " not found", 0x0C)
 		return 1
+	end
+
+	-- type
+	B["type"] = function(args)
+		if #args < 2 then
+			outln("usage: type <command> [...]", 0x07)
+			return 1
+		end
+		local rc = 0
+		for i = 2, #args do
+			local name = args[i]
+			local spec = self:_classifyCommand(name)
+			if spec.kind == "builtin" then
+				outln(name .. " is a shell built-in")
+			elseif spec.kind == "external" then
+				outln(name .. " is " .. spec.path)
+			else
+				outln(name .. ": not found", 0x0C)
+				rc = 1
+			end
+		end
+		return rc
 	end
 
 	-- find
@@ -2532,6 +2686,11 @@ function Shell:_buildBuiltins()
 			outln("  " .. table.concat(row), 0x07)
 		end
 		outln("")
+		outln("Execution model:", 0x0B)
+		outln("  built-in commands: handled internally by nsh", 0x07)
+		outln("  external commands: executable files from PATH", 0x07)
+		outln("Use 'type <cmd>' or 'which <cmd>' to inspect command kind.", 0x07)
+		outln("")
 		outln("Type 'pkgmgr install <pkg>' to install packages.", 0x07)
 		outln("Type 'pkgmgr list'          to list available packages.", 0x07)
 		return 0
@@ -2539,79 +2698,137 @@ function Shell:_buildBuiltins()
 
 	-- lua (interactive Lua REPL via LuauVM)
 	B["lua"] = function(args)
-		B["lua"] = function(args)
-			if args[2] then
-				return self:_runScript(absPath(args[2]), args, {}) or 0
-			end
-
-			outln("NovaLua REPL (LuauVM powered). Type 'exit' to quit.", 0x0B)
-
-			local replBuf = {}
-
-			local function renderPrompt()
-				self.gpu:print("> ")
-			end
-
-			local function handleInput(ch)
-				if ch == "\n" or ch == "\r" then
-					local line = table.concat(replBuf)
-					replBuf = {}
-					self.gpu:println("")
-
-					if line == "exit" or line == "quit" then
-						self:endForeground()
-						return
-					end
-
-					if line ~= "" then
-						local vm = self.luauvm
-						if vm then
-							local sandbox = self:_makeRuntimeEnv({}, {})
-
-							local ok, f = pcall(function()
-								return vm("return " .. line, false, sandbox)
-							end)
-
-							if not ok then
-								ok, f = pcall(function()
-									return vm(line, false, sandbox)
-								end)
-							end
-
-							if ok and f then
-								local rok, result = pcall(f)
-								if rok and result ~= nil then
-									outln(tostring(result), 0x0A)
-								elseif not rok then
-									outln("error: " .. tostring(result), 0x0C)
-								end
-							else
-								outln("compile error: " .. tostring(f), 0x0C)
-							end
-						end
-					end
-
-					renderPrompt()
-				elseif ch == "\b" then
-					if #replBuf > 0 then
-						table.remove(replBuf)
-						self.gpu:print("\b")
-					end
-				else
-					table.insert(replBuf, ch)
-					self.gpu:print(ch)
-				end
-			end
-
-			local ok, err = self:beginForeground("lua-repl", handleInput)
-			if not ok then
-				outln("lua: " .. tostring(err), 0x0C)
-				return 1
-			end
-
-			renderPrompt()
-			return 0
+		if not vmCfg.enabled then
+			outln("lua: VM execution is disabled in config", 0x0C)
+			return 1
 		end
+		if args[2] then
+			local target = absPath(args[2])
+			if target:sub(-#vmCfg.extension) ~= vmCfg.extension and self.vfs:exists(target .. vmCfg.extension) then
+				target = target .. vmCfg.extension
+			end
+			return self:_runScript(target, args, {}) or 0
+		end
+
+		outln("NovaLua REPL (LuauVM powered). Type 'exit' to quit.", 0x0B)
+
+		local replBuf = {}
+
+		local function renderPrompt()
+			self.gpu:print("> ")
+		end
+
+		local function handleInput(ch)
+			if ch == "\n" or ch == "\r" then
+				local line = table.concat(replBuf)
+				replBuf = {}
+				self.gpu:println("")
+
+				if line == "exit" or line == "quit" then
+					self:endForeground()
+					return
+				end
+
+				if line ~= "" then
+					local cpu = self.kernel.machine and self.kernel.machine.cpu
+					if cpu and type(cpu.executeGuestExecutable) == "function" then
+						local execContext = cpu:createExecutionContext({
+							pid = self.kernel.pm and self.kernel.pm._currentPid or 0,
+							argv = { "lua" },
+							env = self.env,
+							executable = {
+								path = "(lua-repl)",
+								kind = "vm",
+								format = "luau",
+								runtime = "luauvm",
+								cpuBackend = self.config.VM and self.config.VM.CPU_BACKEND or nil,
+							},
+							backend = self.config.VM and self.config.VM.DEFAULT_BACKEND or "auto",
+						})
+						local sandbox = self:_makeRuntimeEnv({ "lua" }, {}, execContext)
+
+						local function loadSource(source)
+							return cpu:executeGuestExecutable({
+								path = "(lua-repl)",
+								kind = "vm",
+								format = "luau",
+								runtime = "luauvm",
+								backend = self.config.VM and self.config.VM.DEFAULT_BACKEND or "auto",
+								cpuBackend = self.config.VM and self.config.VM.CPU_BACKEND or nil,
+								content = source,
+							}, sandbox, execContext)
+						end
+
+						local ok, f = pcall(function()
+							return loadSource("return " .. line)
+						end)
+
+						if not ok then
+							ok, f = pcall(function()
+								return loadSource(line)
+							end)
+						end
+
+						if ok and f then
+							local rok, result = pcall(f)
+							if rok and result ~= nil then
+								outln(tostring(result), 0x0A)
+							elseif not rok then
+								outln("error: " .. tostring(result), 0x0C)
+							end
+						else
+							outln("compile error: " .. tostring(f), 0x0C)
+						end
+					else
+						outln("lua: CPU guest execution backend unavailable", 0x0C)
+					end
+				end
+
+				renderPrompt()
+			elseif ch == "\b" then
+				if #replBuf > 0 then
+					table.remove(replBuf)
+					self.gpu:print("\b")
+				end
+			else
+				table.insert(replBuf, ch)
+				self.gpu:print(ch)
+			end
+		end
+
+		local ok, err = self:beginForeground("lua-repl", handleInput)
+		if not ok then
+			outln("lua: " .. tostring(err), 0x0C)
+			return 1
+		end
+
+		renderPrompt()
+		return 0
+	end
+
+	-- Prefer guest executable files for common userland tools.
+	for _, name in ipairs({
+		"ls",
+		"cat",
+		"echo",
+		"pwd",
+		"date",
+		"clear",
+		"true",
+		"false",
+		"sleep",
+		"uname",
+		"wc",
+		"grep",
+		"sort",
+		"which",
+		"find",
+		"head",
+		"tail",
+		"lua",
+		"pkgmgr",
+	}) do
+		B[name] = nil
 	end
 
 	return B
