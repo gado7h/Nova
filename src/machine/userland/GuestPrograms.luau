@@ -45,6 +45,78 @@ return 0
 tty.writeln(process.cwd())
 return 0
 ]],
+	["/bin/mkdir.luau"] = [[
+if #args < 2 then
+	tty.writeln("usage: mkdir <dir> [...]", tty.color(12, 0))
+	return 1
+end
+for i = 2, #args do
+	local ok, err = fs.mkdir(args[i])
+	if not ok then
+		tty.writeln("mkdir: cannot create directory '" .. args[i] .. "': " .. tostring(err), tty.color(12, 0))
+		return 1
+	end
+end
+return 0
+]],
+	["/bin/rm.luau"] = [[
+local recursive = false
+local paths = {}
+for i = 2, #args do
+	if args[i]:sub(1, 1) == "-" then
+		recursive = args[i]:find("r", 2, true) ~= nil or recursive
+	else
+		table.insert(paths, args[i])
+	end
+end
+for _, path in ipairs(paths) do
+	local st = fs.stat(path)
+	if not st then
+		tty.writeln("rm: cannot remove '" .. path .. "': No such file or directory", tty.color(12, 0))
+		return 1
+	end
+	if st.isDir and not recursive then
+		tty.writeln("rm: cannot remove '" .. path .. "': Is a directory", tty.color(12, 0))
+		return 1
+	end
+	fs.rm(path)
+end
+return 0
+]],
+	["/bin/cp.luau"] = [[
+if #args < 3 then
+	tty.writeln("usage: cp <src> <dst>", tty.color(12, 0))
+	return 1
+end
+local ok, result = fs.copy(args[2], args[3])
+if not ok then
+	tty.writeln("cp: " .. tostring(result), tty.color(12, 0))
+	return 1
+end
+return 0
+]],
+	["/bin/mv.luau"] = [[
+if #args < 3 then
+	tty.writeln("usage: mv <src> <dst>", tty.color(12, 0))
+	return 1
+end
+local ok, result = fs.move(args[2], args[3])
+if not ok then
+	tty.writeln("mv: " .. tostring(result), tty.color(12, 0))
+	return 1
+end
+return 0
+]],
+	["/bin/touch.luau"] = [[
+if #args < 2 then
+	tty.writeln("usage: touch <file> [...]", tty.color(12, 0))
+	return 1
+end
+for i = 2, #args do
+	fs.touch(args[i])
+end
+return 0
+]],
 	["/bin/ls.luau"] = [[
 local function listDirectory(path)
 	local entries = fs.ls(path)
