@@ -1,345 +1,499 @@
--- Main.client module
-
-local StarterGui = game:GetService("StarterGui")
+local AssetService = game:GetService("AssetService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local AssetService = game:GetService("AssetService")
+local StarterGui = game:GetService("StarterGui")
 local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
---  Module imports
 local Machina = script.Parent
 local Config = require(Machina:WaitForChild("Config"))
 local PcSystem = require(Machina.platforms.x86:WaitForChild("PcSystem"))
 
---  GUI setup
-local function setupGUI()
+local AUTO_POWER = true
+local SCREEN_ASPECT = Config.SCREEN_W / Config.SCREEN_H
+
+local THEME = {
+	AppBackground = Color3.fromRGB(7, 9, 12),
+	ShellBackground = Color3.fromRGB(12, 15, 20),
+	ShellStroke = Color3.fromRGB(33, 39, 49),
+	PanelBackground = Color3.fromRGB(16, 20, 26),
+	PanelStroke = Color3.fromRGB(39, 46, 57),
+	ScreenBackground = Color3.fromRGB(0, 0, 0),
+	Text = Color3.fromRGB(238, 241, 245),
+	MutedText = Color3.fromRGB(138, 147, 160),
+	Success = Color3.fromRGB(99, 208, 141),
+	Warning = Color3.fromRGB(255, 191, 92),
+	Danger = Color3.fromRGB(255, 110, 110),
+	Button = Color3.fromRGB(26, 31, 39),
+	ButtonDanger = Color3.fromRGB(56, 27, 31),
+}
+
+local CORE_GUI_TYPES = {}
+for _, coreGuiType in ipairs(Enum.CoreGuiType:GetEnumItems()) do
+	if coreGuiType ~= Enum.CoreGuiType.All then
+		table.insert(CORE_GUI_TYPES, coreGuiType)
+	end
+end
+
+local function create(className, props, parent)
+	local instance = Instance.new(className)
+	for key, value in pairs(props or {}) do
+		instance[key] = value
+	end
+	instance.Parent = parent
+	return instance
+end
+
+local function addCorner(instance, radius)
+	return create("UICorner", {
+		CornerRadius = UDim.new(0, radius),
+	}, instance)
+end
+
+local function addStroke(instance, color, thickness, transparency)
+	return create("UIStroke", {
+		Color = color,
+		Thickness = thickness or 1,
+		Transparency = transparency or 0,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	}, instance)
+end
+
+local function setButtonEnabled(button, enabled)
+	button.Active = enabled
+	button.AutoButtonColor = enabled
+	button.TextTransparency = enabled and 0 or 0.45
+	button.BackgroundTransparency = enabled and 0 or 0.25
+end
+
+local function createActionButton(text, backgroundColor, parent)
+	local button = create("TextButton", {
+		Name = text .. "Button",
+		Size = UDim2.fromOffset(text == "Shutdown" and 88 or 76, 32),
+		BackgroundColor3 = backgroundColor,
+		BorderSizePixel = 0,
+		AutoButtonColor = true,
+		Font = Enum.Font.GothamMedium,
+		Text = text,
+		TextColor3 = THEME.Text,
+		TextSize = 13,
+	}, parent)
+
+	addCorner(button, 10)
+	addStroke(button, THEME.PanelStroke, 1)
+
+	return button
+end
+
+local function tryCoreGuiCall(callback)
+	for _ = 1, 8 do
+		local ok = pcall(callback)
+		if ok then
+			return true
+		end
+		task.wait(0.25)
+	end
+
+	return false
+end
+
+local function disableCoreGui()
+	for _, coreGuiType in ipairs(CORE_GUI_TYPES) do
+		tryCoreGuiCall(function()
+			StarterGui:SetCoreGuiEnabled(coreGuiType, false)
+		end)
+	end
+
+	tryCoreGuiCall(function()
+		StarterGui:SetCore("TopbarEnabled", false)
+	end)
+end
+
+local function fitDisplay(screenFrame, containerFrame)
+	local containerSize = containerFrame.AbsoluteSize
+	if containerSize.X <= 0 or containerSize.Y <= 0 then
+		return
+	end
+
+	local width = containerSize.X
+	local height = math.floor(width / SCREEN_ASPECT)
+
+	if height > containerSize.Y then
+		height = containerSize.Y
+		width = math.floor(height * SCREEN_ASPECT)
+	end
+
+	screenFrame.Size = UDim2.fromOffset(width, height)
+end
+
+local function createEditableImage(imageLabel)
+	local editableImage = AssetService:CreateEditableImage({
+		Size = Vector2.new(Config.SCREEN_W, Config.SCREEN_H),
+	})
+
+	imageLabel.ImageContent = Content.fromObject(editableImage)
+
+	return editableImage
+end
+
+local function buildGui()
 	local existing = playerGui:FindFirstChild("MachinaGui")
+	
 	if existing then
 		existing:Destroy()
 	end
 
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "MachinaGui"
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	gui.Parent = playerGui
+	local gui = create("ScreenGui", {
+		Name = "MachinaGui",
+		ResetOnSpawn = false,
+		IgnoreGuiInset = false,
+		DisplayOrder = 1000,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, playerGui)
 
-	-- CRT bezel (full screen dark background)
-	local bezel = Instance.new("Frame")
-	bezel.Name = "Bezel"
-	bezel.Size = UDim2.fromScale(1, 1)
-	bezel.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
-	bezel.BorderSizePixel = 0
-	bezel.Parent = gui
+	local background = create("ScreenGui", {
+		Name = "Background",
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = 0,
+	}, playerGui)
 
-	-- Inner screen frame — maintains 320:200 (16:10) aspect ratio
-	local screen = Instance.new("Frame")
-	screen.Name = "ScreenFrame"
-	screen.AnchorPoint = Vector2.new(0.5, 0.5)
-	screen.Position = UDim2.fromScale(0.5, 0.5)
-	screen.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-	screen.BorderSizePixel = 2
-	screen.Parent = bezel
+	create("Frame", {
+		Name = "Foreground",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = THEME.AppBackground,
+	}, background)
+	
+	pcall(function()
+		gui.ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets
+	end)
 
-	local function updateScreenSize()
-		local vp = gui.AbsoluteSize
-		local maxH = vp.Y * 0.88
-		local maxW = vp.X * 0.88
-		local h = math.min(maxH, maxW * (200 / 320))
-		local w = h * (320 / 200)
-		screen.Size = UDim2.fromOffset(math.floor(w), math.floor(h))
-	end
-	updateScreenSize()
-	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateScreenSize)
+	local root = create("Frame", {
+		Name = "Root",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = THEME.AppBackground,
+		BorderSizePixel = 0,
+	}, gui)
 
-	-- Scanline overlay (cosmetic)
-	local scanlines = Instance.new("Frame")
-	scanlines.Name = "Scanlines"
-	scanlines.Size = UDim2.fromScale(1, 1)
-	scanlines.BackgroundTransparency = 1
-	scanlines.BorderSizePixel = 0
-	scanlines.ZIndex = 3
-	scanlines.Parent = screen
+	create("UIPadding", {
+		PaddingTop = UDim.new(0, 12),
+		PaddingBottom = UDim.new(0, 12),
+		PaddingLeft = UDim.new(0, 12),
+		PaddingRight = UDim.new(0, 12),
+	}, root)
 
-	local scanlineGrad = Instance.new("UIGradient")
-	scanlineGrad.Color = ColorSequence.new({
-		ColorSequenceKeypoint.new(0, Color3.new(0, 0, 0)),
-		ColorSequenceKeypoint.new(0.49, Color3.new(0, 0, 0)),
-		ColorSequenceKeypoint.new(0.5, Color3.new(1, 1, 1)),
-		ColorSequenceKeypoint.new(1, Color3.new(1, 1, 1)),
-	})
-	scanlineGrad.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.82),
-		NumberSequenceKeypoint.new(0.49, 0.82),
-		NumberSequenceKeypoint.new(0.5, 1),
-		NumberSequenceKeypoint.new(1, 1),
-	})
-	scanlineGrad.Rotation = 90
-	scanlineGrad.Parent = scanlines
+	local shell = create("Frame", {
+		Name = "Shell",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = THEME.ShellBackground,
+		BorderSizePixel = 0,
+	}, root)
+	addCorner(shell, 16)
+	addStroke(shell, THEME.ShellStroke, 1)
 
-	-- ImageLabel that renders the EditableImage (the actual screen)
-	local imgLabel = Instance.new("ImageLabel")
-	imgLabel.Name = "Screen"
-	imgLabel.Size = UDim2.fromScale(1, 1)
-	imgLabel.BackgroundColor3 = Color3.new(0, 0, 0)
-	imgLabel.BackgroundTransparency = 0
-	imgLabel.BorderSizePixel = 0
-	imgLabel.ScaleType = Enum.ScaleType.Stretch
-	imgLabel.ResampleMode = Enum.ResamplerMode.Pixelated
-	imgLabel.ZIndex = 2
-	imgLabel.Parent = screen
+	local topBar = create("Frame", {
+		Name = "TopBar",
+		Position = UDim2.fromOffset(12, 12),
+		Size = UDim2.new(1, -24, 0, 42),
+		BackgroundColor3 = THEME.PanelBackground,
+		BorderSizePixel = 0,
+	}, shell)
+	addCorner(topBar, 12)
+	addStroke(topBar, THEME.PanelStroke, 1)
 
-	-- Subtle CRT green glow
-	local glow = Instance.new("Frame")
-	glow.Name = "CRTGlow"
-	glow.Size = UDim2.new(1, 10, 1, 10)
-	glow.Position = UDim2.fromOffset(-5, -5)
-	glow.BackgroundColor3 = Color3.fromRGB(0, 180, 100)
-	glow.BackgroundTransparency = 0.92
-	glow.BorderSizePixel = 0
-	glow.ZIndex = 1
-	glow.Parent = screen
-	Instance.new("UICorner", glow).CornerRadius = UDim.new(0, 5)
+	create("TextLabel", {
+		Name = "Title",
+		Position = UDim2.fromOffset(14, 0),
+		Size = UDim2.fromOffset(120, 42),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		Text = "Machina x86",
+		TextColor3 = THEME.Text,
+		TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, topBar)
 
-	-- Power LED (top-right bezel corner)
-	local powerLED = Instance.new("Frame")
-	powerLED.Name = "PowerLED"
-	powerLED.Size = UDim2.fromOffset(8, 8)
-	powerLED.Position = UDim2.new(1, -20, 0, 12)
-	powerLED.BackgroundColor3 = Color3.fromRGB(80, 0, 0)
-	powerLED.BorderSizePixel = 0
-	powerLED.ZIndex = 5
-	powerLED.Parent = bezel
-	Instance.new("UICorner", powerLED).CornerRadius = UDim.new(1, 0)
+	local stageDot = create("Frame", {
+		Name = "StageDot",
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 132, 0.5, 0),
+		Size = UDim2.fromOffset(8, 8),
+		BackgroundColor3 = THEME.Danger,
+		BorderSizePixel = 0,
+	}, topBar)
+	addCorner(stageDot, 99)
 
-	return gui, screen, imgLabel, powerLED
+	local stageLabel = create("TextLabel", {
+		Name = "StageLabel",
+		Position = UDim2.fromOffset(148, 0),
+		Size = UDim2.fromOffset(180, 42),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		Text = "offline",
+		TextColor3 = THEME.MutedText,
+		TextSize = 13,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, topBar)
+
+	local actions = create("Frame", {
+		Name = "Actions",
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -10, 0.5, 0),
+		Size = UDim2.fromOffset(172, 32),
+		BackgroundTransparency = 1,
+	}, topBar)
+
+	create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Right,
+		Padding = UDim.new(0, 8),
+	}, actions)
+
+	local rebootButton = createActionButton("Reboot", THEME.Button, actions)
+	local shutdownButton = createActionButton("Shutdown", THEME.ButtonDanger, actions)
+
+	local screenHost = create("Frame", {
+		Name = "ScreenHost",
+		Position = UDim2.fromOffset(12, 66),
+		Size = UDim2.new(1, -24, 1, -78),
+		BackgroundColor3 = THEME.PanelBackground,
+		BorderSizePixel = 0,
+	}, shell)
+	addCorner(screenHost, 14)
+	addStroke(screenHost, THEME.PanelStroke, 1)
+
+	local screenFrame = create("Frame", {
+		Name = "ScreenFrame",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		BackgroundColor3 = THEME.ScreenBackground,
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+		Active = true,
+	}, screenHost)
+	addCorner(screenFrame, 14)
+	addStroke(screenFrame, Color3.fromRGB(28, 32, 39), 1)
+
+	local imageLabel = create("ImageLabel", {
+		Name = "Screen",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = THEME.ScreenBackground,
+		BorderSizePixel = 0,
+		ScaleType = Enum.ScaleType.Stretch,
+		ResampleMode = Enum.ResamplerMode.Pixelated,
+	}, screenFrame)
+
+	local statsPanel = create("Frame", {
+		Name = "StatsPanel",
+		Position = UDim2.fromOffset(12, 12),
+		Size = UDim2.fromOffset(250, 150),
+		BackgroundColor3 = Color3.fromRGB(9, 12, 17),
+		BackgroundTransparency = 0.15,
+		BorderSizePixel = 0,
+		Visible = false,
+		ZIndex = 5,
+	}, screenHost)
+	addCorner(statsPanel, 12)
+	addStroke(statsPanel, THEME.PanelStroke, 1)
+
+	local statsLabel = create("TextLabel", {
+		Name = "StatsLabel",
+		Size = UDim2.new(1, -20, 1, -20),
+		Position = UDim2.fromOffset(10, 10),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Code,
+		Text = "",
+		TextColor3 = THEME.Text,
+		TextSize = 12,
+		TextWrapped = false,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		ZIndex = 6,
+	}, statsPanel)
+
+	local offOverlay = create("TextButton", {
+		Name = "OffOverlay",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.fromRGB(5, 6, 9),
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Font = Enum.Font.GothamMedium,
+		Text = "Click to boot",
+		TextColor3 = THEME.MutedText,
+		TextSize = 18,
+		ZIndex = 4,
+	}, screenFrame)
+
+	local offHint = create("TextLabel", {
+		Name = "OffHint",
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, -18),
+		Size = UDim2.fromOffset(220, 18),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.Gotham,
+		Text = "F12 opens runtime stats",
+		TextColor3 = THEME.MutedText,
+		TextSize = 12,
+		ZIndex = 5,
+	}, offOverlay)
+
+	fitDisplay(screenFrame, screenHost)
+	screenHost:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		fitDisplay(screenFrame, screenHost)
+	end)
+
+	return {
+		gui = gui,
+		screenFrame = screenFrame,
+		imageLabel = imageLabel,
+		stageDot = stageDot,
+		stageLabel = stageLabel,
+		rebootButton = rebootButton,
+		shutdownButton = shutdownButton,
+		offOverlay = offOverlay,
+		offHint = offHint,
+		statsPanel = statsPanel,
+		statsLabel = statsLabel,
+	}
 end
 
---  EditableImage — MUST be exactly 320×200
---
---  KEY FIX: GPU:flush() calls WritePixels with size Vector2(320,200).
---  If the EditableImage is any other size (e.g. 1920×1080), the write
---  only fills the top-left corner and the rest of the image stays black,
---  making the screen appear completely black.
-local function createEditableImage(imageLabel)
-	local ei = AssetService:CreateEditableImage({
-		Size = Vector2.new(Config.SCREEN_W, Config.SCREEN_H), -- 320×200
-	})
-	imageLabel.ImageContent = Content.fromObject(ei)
-	return ei
-end
+local function setStage(ui, machine)
+	local powered = machine and machine:isPowered() or false
+	local stage = machine and machine:getBootStage() or "OFF"
+	local color = THEME.Danger
+	local text = "offline"
 
---  Power / Reboot button strip
-local function addPowerButton(bezelFrame, onPower, onReboot)
-	local btnFrame = Instance.new("Frame")
-	btnFrame.Size = UDim2.fromOffset(120, 30)
-	btnFrame.Position = UDim2.new(0.5, -60, 1, -42)
-	btnFrame.BackgroundColor3 = Color3.fromRGB(10, 18, 35)
-	btnFrame.BorderSizePixel = 0
-	btnFrame.ZIndex = 6
-	btnFrame.Parent = bezelFrame
-	Instance.new("UICorner", btnFrame).CornerRadius = UDim.new(0, 4)
-
-	local function makeBtn(text, xOff, clr, fn)
-		local btn = Instance.new("TextButton")
-		btn.Size = UDim2.fromOffset(52, 22)
-		btn.Position = UDim2.fromOffset(xOff, 4)
-		btn.BackgroundColor3 = clr
-		btn.TextColor3 = Color3.new(1, 1, 1)
-		btn.Text = text
-		btn.TextSize = 11
-		btn.Font = Enum.Font.Code
-		btn.BorderSizePixel = 0
-		btn.ZIndex = 7
-		btn.Parent = btnFrame
-		Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 3)
-		btn.Activated:Connect(fn)
-	end
-
-	makeBtn("⏻ POWER", 4, Color3.fromRGB(20, 100, 20), onPower)
-	makeBtn("↺ REBOOT", 64, Color3.fromRGB(60, 40, 10), onReboot)
-end
-
---  Power LED colour based on boot stage
-local function startLEDBlink(led, getMachine)
-	local t = 0
-	RunService.Heartbeat:Connect(function(dt)
-		t = t + dt
-		if t < 0.4 then
-			return
-		end
-		t = 0
-		local m = getMachine()
-		local stage = m and m:getBootStage() or "OFF"
-		if stage == "OFF" then
-			led.BackgroundColor3 = Color3.fromRGB(80, 0, 0)
-		elseif stage == "RUNNING" then
-			local v = math.abs(math.sin(os.clock() * math.pi))
-			led.BackgroundColor3 = Color3.new(0, v, v * 0.3)
+	if powered then
+		text = string.lower(stage)
+		if stage == "RUNNING" then
+			color = THEME.Success
+		elseif stage == "FAULT" then
+			color = THEME.Danger
 		else
-			-- amber blink during boot
-			local v = (os.clock() % 1) < 0.5 and 1 or 0.35
-			led.BackgroundColor3 = Color3.new(v, v * 0.5, 0)
+			color = THEME.Warning
 		end
-	end)
+	end
+
+	ui.stageDot.BackgroundColor3 = color
+	ui.stageLabel.Text = text
+	ui.stageLabel.TextColor3 = powered and THEME.Text or THEME.MutedText
+	ui.offOverlay.Visible = not powered
+	setButtonEnabled(ui.rebootButton, powered)
+	setButtonEnabled(ui.shutdownButton, powered)
 end
 
---  HDD activity LED
-local function addHDDLED(screenFrame, getMachine)
-	local led = Instance.new("Frame")
-	led.Name = "HddLED"
-	led.Size = UDim2.fromOffset(6, 6)
-	led.Position = UDim2.new(1, -10, 1, -10)
-	led.BackgroundColor3 = Color3.fromRGB(0, 20, 60)
-	led.BorderSizePixel = 0
-	led.ZIndex = 8
-	led.Parent = screenFrame
-	Instance.new("UICorner", led).CornerRadius = UDim.new(1, 0)
+local function updateStats(ui, machine)
+	if not ui.statsPanel.Visible then
+		return
+	end
 
-	RunService.Heartbeat:Connect(function()
-		local m = getMachine()
-		if m and m.hdd and m.hdd:isActive() then
-			led.BackgroundColor3 = Color3.fromRGB(0, 100, 255)
-		else
-			led.BackgroundColor3 = Color3.fromRGB(0, 20, 60)
-		end
-	end)
+	if not machine or not machine:isPowered() then
+		ui.statsLabel.Text = "POWERED OFF"
+		return
+	end
+
+	local stats = machine:getStats()
+	local cpu = stats.cpuStats or {}
+	local ram = stats.ramStats or {}
+	local hdd = stats.hddStats or {}
+	local bus = stats.busStats or {}
+
+	ui.statsLabel.Text = string.format(
+		"Machina  [F12]\n"
+			.. "Stage:  %s\n"
+			.. "Uptime: %.1fs\n"
+			.. "CPU cycles: %d\n"
+			.. "CPU instrs: %d\n"
+			.. "RAM  r/w: %d/%d\n"
+			.. "HDD  r/w: %d/%d\n"
+			.. "Bus IRQs: %d\n"
+			.. "GPU flush: %d",
+		tostring(stats.bootStage),
+		stats.uptime or 0,
+		cpu.cycles or 0,
+		cpu.instructions or 0,
+		ram.reads or 0,
+		ram.writes or 0,
+		hdd.reads or 0,
+		hdd.writes or 0,
+		bus.irqFired or 0,
+		(stats.gpuStats and stats.gpuStats.flushes) or 0
+	)
 end
 
---  F12 stats overlay
-local function addStatsOverlay(bezelFrame, getMachine)
-	local overlay = Instance.new("Frame")
-	overlay.Name = "StatsOverlay"
-	overlay.Size = UDim2.fromOffset(230, 150)
-	overlay.Position = UDim2.fromOffset(8, 8)
-	overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-	overlay.BackgroundTransparency = 0.3
-	overlay.BorderSizePixel = 1
-	overlay.BorderColor3 = Color3.fromRGB(0, 200, 100)
-	overlay.ZIndex = 10
-	overlay.Visible = false
-	overlay.Parent = bezelFrame
-
-	local lbl = Instance.new("TextLabel")
-	lbl.Size = UDim2.fromScale(1, 1)
-	lbl.BackgroundTransparency = 1
-	lbl.TextColor3 = Color3.fromRGB(0, 220, 120)
-	lbl.Font = Enum.Font.Code
-	lbl.TextSize = 11
-	lbl.TextXAlignment = Enum.TextXAlignment.Left
-	lbl.TextYAlignment = Enum.TextYAlignment.Top
-	lbl.Text = ""
-	lbl.ZIndex = 11
-	lbl.Parent = overlay
-
-	UserInputService.InputBegan:Connect(function(input, gp)
-		if gp then
-			return
-		end
-		if input.KeyCode == Enum.KeyCode.F12 then
-			overlay.Visible = not overlay.Visible
-		end
-	end)
-
-	local statTimer = 0
-	RunService.Heartbeat:Connect(function(dt)
-		statTimer = statTimer + dt
-		if statTimer < 0.5 then
-			return
-		end
-		statTimer = 0
-		if not overlay.Visible then
-			return
-		end
-		local m = getMachine()
-		if not m or not m:isPowered() then
-			lbl.Text = "POWERED OFF"
-			return
-		end
-		local s = m:getStats()
-		local cpu = s.cpuStats or {}
-		local ram = s.ramStats or {}
-		local hdd = s.hddStats or {}
-		local bus = s.busStats or {}
-		lbl.Text = string.format(
-			"Machina  [F12]\n"
-				.. "Stage:  %s\n"
-				.. "Uptime: %.1fs\n"
-				.. "CPU cycles: %d\n"
-				.. "CPU instrs: %d\n"
-				.. "RAM  r/w: %d/%d\n"
-				.. "HDD  r/w: %d/%d\n"
-				.. "Bus IRQs: %d\n"
-				.. "GPU flush: %d",
-			tostring(s.bootStage),
-			s.uptime or 0,
-			cpu.cycles or 0,
-			cpu.instructions or 0,
-			ram.reads or 0,
-			ram.writes or 0,
-			hdd.reads or 0,
-			hdd.writes or 0,
-			bus.irqFired or 0,
-			(s.gpuStats and s.gpuStats.flushes) or 0
-		)
-	end)
-end
-
---  Entrypoint
 local machine = nil
-local function getMachine()
-	return machine
+
+local function powerOnMachine()
+	if not machine or machine:isPowered() then
+		return
+	end
+
+	machine:powerOn()
+	machine:bindInput(UserInputService)
+end
+
+local function shutdownMachine()
+	if machine and machine:isPowered() then
+		machine:shutdown()
+	end
+end
+
+local function rebootMachine()
+	if machine and machine:isPowered() then
+		machine:reboot()
+	end
 end
 
 local function main()
-	local gui, screenFrame, imageLabel, powerLED = setupGUI()
+	local ui = buildGui()
+	local editableImage = createEditableImage(ui.imageLabel)
 
-	-- EditableImage: 320×200, same as GPU resolution
-	local editableImage = createEditableImage(imageLabel)
-
-	-- Build machine
 	machine = PcSystem.new(Config, editableImage)
 
-	-- UI chrome
-	addHDDLED(screenFrame, getMachine)
-	startLEDBlink(powerLED, getMachine)
-	addStatsOverlay(gui:FindFirstChild("Bezel"), getMachine)
+	ui.offOverlay.Activated:Connect(powerOnMachine)
+	ui.rebootButton.Activated:Connect(rebootMachine)
+	ui.shutdownButton.Activated:Connect(shutdownMachine)
 
-	local powered = false
-	addPowerButton(gui:FindFirstChild("Bezel"), function()
-		if not powered then
-			powered = true
-			machine:powerOn()
-			machine:bindInput(UserInputService)
+	UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed then
+			return
 		end
-	end, function()
-		if powered then
-			machine:reboot()
+
+		if input.KeyCode == Enum.KeyCode.F12 then
+			ui.statsPanel.Visible = not ui.statsPanel.Visible
 		end
 	end)
 
-	-- Auto-boot on join (change to false to require button press)
-	local AUTO_POWER = false
-	if AUTO_POWER then
-		task.delay(0.3, function()
-			if not powered then
-				powered = true
-				machine:powerOn()
-				machine:bindInput(UserInputService)
-			end
-		end)
-	end
+	local statsTimer = 0
+	RunService.Heartbeat:Connect(function(dt)
+		setStage(ui, machine)
+
+		statsTimer = statsTimer + dt
+		if statsTimer >= 0.5 then
+			statsTimer = 0
+			updateStats(ui, machine)
+		end
+	end)
 
 	player.CharacterRemoving:Connect(function()
-		if machine then
-			machine._powered = false
+		shutdownMachine()
+	end)
+
+	player.CharacterAdded:Connect(function()
+		task.defer(disableCoreGui)
+		if AUTO_POWER then
+			task.delay(0.25, powerOnMachine)
 		end
 	end)
+
+	task.defer(disableCoreGui)
+
+	if AUTO_POWER then
+		task.defer(powerOnMachine)
+	end
 end
 
-StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, false)
 main()

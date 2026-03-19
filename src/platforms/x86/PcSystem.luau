@@ -264,7 +264,7 @@ function PcSystem:bindInput(inputService)
 	end
 end
 
-function PcSystem:reboot()
+function PcSystem:_powerDown(clearScreen)
 	if self.keyboard then
 		self.keyboard:unbind()
 	end
@@ -275,14 +275,24 @@ function PcSystem:reboot()
 	self.runtime = nil
 	self.kernel = nil
 	self._bootRecord = nil
+	self._cursorTimer = 0
 
 	if self.ram then
 		self.ram._mem = {}
 	end
 
-	if self.gpu then
+	if clearScreen and self.gpu then
 		self.gpu:clearScreen()
+		self.gpu:flush()
 	end
+end
+
+function PcSystem:shutdown()
+	self:_powerDown(true)
+end
+
+function PcSystem:reboot()
+	self:_powerDown(true)
 
 	task.delay(0.5, function()
 		self:powerOn()
