@@ -2,67 +2,44 @@
 
 ## Entry Points
 
-- `src/machine/Main.client.luau`
-  - Creates UI screen and LEDs.
-  - Instantiates motherboard + machine services.
-  - Starts or reboots machine lifecycle.
-- `src/server/Main.server.luau`
-  - Server bootstrap and remote/data orchestration.
+- `src/Host.client.luau`
+  - Creates the GUI surface and editable image used for rendering the guest screen.
+  - Instantiates `platforms/x86/PcSystem.luau` which builds the emulated board and devices.
+  - Starts or reboots machine lifecycle via the PcSystem API.
+- `src/net_bridge/Main.server.luau`
+  - Server bootstrap and remote/datastore orchestration for saving/loading HDD snapshots and syncing machine state.
 
-## Core Machine
+## Core Machine (platforms/x86)
 
-- `src/machine/Config.luau`
-  - Central constants used across hardware/kernel/userland.
+- `src/platforms/x86/PcSystem.luau`
+  - Central PC system wrapper: builds hardware devices, configures board parameters, and manages power/heartbeat/boot stages.
+  - Exposes runtime controls (powerOn, shutdown, reboot, bindInput) and statistics (getStats, getBootStage).
 
-- `src/machine/hardware/Motherboard.luau`
-  - Integrates CPU, RAM, ROM, HDD, GPU, bus, keyboard.
-  - Owns startup state and stage progression.
+- `src/platforms/x86/BootController.luau`
+  - Drives BIOS -> boot sector -> protected-mode bring-up sequencing and loads boot artifacts into HDD/ROM.
 
-## Firmware & Boot
+- `src/platforms/x86/BootImageCatalog.luau`
+  - Generates boot sector, protected-mode stub/monitor and BIOS ROM bytes used by the BootController.
 
-- `src/machine/firmware/BIOS.luau`
-  - POST sequence and pre-boot checks.
-- `src/machine/bootloader/Bootloader.luau`
-  - Loads kernel target and transfers execution.
+- `src/platforms/x86/ProtectedModeSelfTest.luau`
+  - Utility to validate protected-mode entry sequences against the CPU/memory implementation.
 
-## Kernel
+## Hardware / Devices (examples)
 
-- `src/machine/kernel/Kernel.luau`
-  - Kernel coordinator and lifecycle manager.
-- `src/machine/kernel/MemoryManager.luau`
-  - Physical/virtual memory abstractions.
-- `src/machine/kernel/ProcessManager.luau`
-  - PCB state, scheduler queues, process control.
-- `src/machine/kernel/Syscall.luau`
-  - Numeric syscall dispatch and argument routing.
-- `src/machine/kernel/VFS.luau`
-  - Filesystem object operations and path handling.
-
-## Userland
-
-- `src/machine/userland/Init.luau`
-  - First user process initialization.
-- `src/machine/userland/Shell.luau`
-  - Command parser and shell commands.
-
-## Package Management
-
-- `src/machine/pkgmgr/PackageManager.luau`
-  - Install/remove/resolve package actions.
-- `src/machine/pkgmgr/PackageDB.luau`
-  - Persistent package index structures.
-
-## LuauVM Runtime
-
-- `src/machine/LuauVM/init.luau` - public VM API (compiler+Base64 backed loader).
-- `src/machine/LuauVM/Compiler.luau` - compiler implementation.
-- `src/machine/LuauVM/Fiu.luau` - VM execution engine.
-- `src/machine/LuauVM/Base64.luau` - bytecode encode/decode helper.
-
+- `src/platforms/x86/devices/SystemBus.luau` – bus and device registration/dispatch.
+- `src/platforms/x86/devices/PhysicalMemory.luau` – physical RAM abstraction.
+- `src/platforms/x86/devices/FirmwareRom.luau` – BIOS ROM image flashing/reading.
+- `src/platforms/x86/devices/VgaAdapter.luau` – text framebuffer and editable image integration.
+- `src/platforms/x86/devices/AtaController.luau` – HDD sector interface.
+- `src/platforms/x86/devices/I8042Controller.luau` – keyboard scancode handling.
 
 ## Server Services
 
-- `src/server/ServerScriptService/network/NetworkService.luau`
-  - Creates MachinaNet remotes for save/load/sync operations.
-- `src/server/ServerScriptService/datastore/HDDStore.luau`
-  - Persists virtual HDD snapshots in Roblox DataStore.
+- `src/net_bridge/network/NetworkService.luau`
+  - Creates MachinaNet remotes for save/load/sync operations between client and server.
+- `src/net_bridge/datastore/HDDStore.luau`
+  - Persists virtual HDD snapshots in Roblox DataStore keyed by player.
+
+## Notes
+
+Files and module paths have been reorganized around `src/platforms/x86` and `src/net_bridge` (client GUI/host integration is now `Host.client.luau`). This document focuses on the modules currently present under `src/platforms/x86` and the `net_bridge` server adapter.

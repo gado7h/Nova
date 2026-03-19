@@ -6,23 +6,15 @@ Machina is a Roblox-based virtual machine project written in Luau. It emulates a
 
 - Simulated hardware: CPU, RAM, ROM, bus, HDD, keyboard, and GPU.
 - Firmware POST and staged boot flow.
-- Kernel subsystems for memory, process management, syscalls, and VFS.
-- Basic userland init/shell and package-management modules.
-- LuauVM integration for compiled-bytecode + Base64 packaging and VM-backed execution.
+- Kernel subsystems for memory, process management, syscalls, and VFS (guest-side modules if present).
+- Basic userland init/shell and package-management modules (guest).
+- Tools for generating boot artifacts (assembler + BIOS ROM builders) and protected-mode bring-up stubs.
 
-## Project Layout
+## Project Layout (relevant files)
 
-- `src/machine/Config.luau` – global machine constants.
-- `src/machine/Main.client.luau` – client entry point and GUI boot surface.
-- `src/machine/hardware/` – hardware emulation modules (device wiring, bus, clocks, memory maps).
-- `src/machine/software/` – software runtime orchestration (firmware → bootloader → kernel lifecycle).
-- `src/machine/firmware/` – BIOS-style firmware startup.
-- `src/machine/bootloader/` – stage loader and kernel handoff.
-- `src/machine/kernel/` – core OS modules.
-- `src/machine/userland/` – init and shell logic.
-- `src/machine/pkgmgr/` – package manager and package DB logic.
-- `src/machine/LuauVM/` – bundled Luau compiler/runtime glue.
-- `src/server/ServerScriptService/` – server networking + datastore services.
+- `src/Host.client.luau` – client entry point and GUI boot surface that instantiates PcSystem.
+- `src/platforms/x86/` – platform-specific PC implementation and device modules (PcSystem, BootController, Cpu80386, devices/*).
+- `src/net_bridge/` – server/client bridging code for network remotes and datastore persistence (Main.server.luau, network, datastore).
 
 ## Development
 
@@ -36,7 +28,7 @@ Machina is a Roblox-based virtual machine project written in Luau. It emulates a
 1. Install toolchain dependencies (via `rokit` and your local setup).
 2. Open the project in Roblox Studio.
 3. Sync source with Rojo.
-4. Run the game and observe the Machina boot sequence.
+4. Run the game and observe the Machina boot sequence (the client GUI is created by `src/Host.client.luau`).
 
 ## Style
 

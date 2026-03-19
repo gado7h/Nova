@@ -2,66 +2,63 @@
 
 ## Boot Pipeline
 
-1. `Main.client.luau` creates the display surface and motherboard instance.
-2. `hardware/Motherboard.luau` powers and wires physical devices.
-3. `software/RuntimeController.luau` drives BIOS -> bootloader -> kernel transitions.
-4. `kernel/Kernel.luau` initializes core subsystems.
-5. `userland/Init.luau` starts shell and user workflows.
+1. `src/Host.client.luau` creates the display surface and instantiates the PC system (PcSystem).
+2. `src/platforms/x86/PcSystem.luau` wires physical devices and builds the board configuration.
+3. `src/platforms/x86/BootController.luau` drives BIOS -> bootloader -> kernel transitions (via BootImageCatalog artifacts).
+4. `kernel/*` (guest code) initializes core subsystems once the kernel image is loaded.
+5. `userland/*` starts shell and user workflows inside the guest.
 
 ## Layers
 
 ### Hardware Layer
 
-`hardware/*` emulates machine devices and data transport:
+`src/platforms/x86/*` emulates machine devices and data transport:
 
-- `Bus` coordinates memory-mapped/port I/O and IRQ flow.
-- `CPU` executes machine instructions and timing.
-- `RAM` and `ROM` provide volatile/non-volatile memory.
-- `HDD` stores disk sectors and filesystem data.
-- `GPU` manages pixel output to the Roblox screen surface.
-- `Keyboard` converts Roblox input to scancodes.
+- `Bus` coordinates memory-mapped/port I/O and IRQ flow (implemented in the platform device bus modules).
+- `CPU` executes machine instructions and timing (see `Cpu80386` in `platforms/x86`).
+- `RAM` and `ROM` provide volatile/non-volatile memory (PhysicalMemory / FirmwareRom).
+- `HDD` stores disk sectors and filesystem data (AtaController/HDD integration).
+- `GPU` manages pixel/text output to the Roblox screen surface (VgaAdapter + editable image integration).
+- `Keyboard` converts Roblox input to scancodes (I8042Controller).
 
 
 ### Software Runtime Layer
 
-`software/*` owns OS bring-up flow and software-only runtime concerns:
+Platform-specific runtime modules own bring-up and runtime concerns:
 
-- `RuntimeController` advances boot stages (BIOS -> BOOT -> KERNEL -> RUNNING).
-- Instantiates firmware/bootloader/kernel modules once hardware is ready.
+- `BootController` advances boot stages (BIOS -> BOOT -> KERNEL -> RUNNING) and instantiates BIOS/boot artifacts.
+- Boot images are produced/loaded via `BootImageCatalog` and related assembler/ROM helpers.
+
 
 ### Firmware + Boot
 
-- `BIOS` handles startup diagnostics.
-- `Bootloader` validates boot context and hands control to kernel.
+- `BiosInterrupts` and BIOS ROMs handle startup diagnostics and interrupt hooks.
+- Bootloader artifacts (boot sector + protected-mode bring-up) are generated and loaded from disk sectors.
+
 
 ### Kernel Layer
 
-- `MemoryManager` controls page allocation and mapping.
-- `ProcessManager` tracks process lifecycle and scheduling.
-- `VFS` provides filesystem primitives.
-- `Syscall` is the user/kernel API boundary.
-- `Kernel` coordinates initialization, ticks, panic/reboot paths.
+- Kernel subsystems run once a kernel image is loaded into guest memory. The repository contains boot/runtime scaffolding in `platforms/x86` to load and hand off control to guest code.
+
 
 ### Userland + Packages
 
-- `Init` performs first-process startup tasks.
-- `Shell` implements command loop/UI interactions.
-- `PackageManager` and `PackageDB` track and resolve installed packages.
+- Userland shells and managed runtimes are guest components launched by the kernel once the kernel has initialized drivers and the VFS.
+
 
 ### LuauVM
 
-`LuauVM/*` bundles compiler+Base64 runtime support for executing Luau payloads with FiU-backed bytecode execution.
+- Some workflows in the project surface a managed Luau runtime for higher-level guest programs; the VM/runtime glue may live in separate modules when present.
 
 ## Data Flow Summary
 
-- Input: Roblox keyboard events -> keyboard device -> IRQ/syscall path.
-- Compute: scheduler selects runnable process -> syscall/kernel services.
-- Storage: VFS operations -> HDD sector/block updates.
-- Output: kernel/userland text/video writes -> GPU framebuffer -> GUI image.
-
+- Input: Roblox keyboard events -> keyboard device -> IRQ/syscall path into guest firmware/kernel.
+- Compute: CPU executes guest instructions; scheduler (guest) selects runnable processes.
+- Storage: VFS operations -> HDD sector/block updates (host-side code persists sectors into AtaController/hdd image).
+- Output: kernel/userland text/video writes -> GPU framebuffer -> editable image updated on the Roblox GUI.
 
 ## Server Services
 
-- `Main.server.luau` initializes server-only runtime services.
+- `src/net_bridge/Main.server.luau` initializes server-only runtime services.
 - Network service provisions remotes for machine state and HDD save/load.
-- Datastore service persists HDD snapshots per player key.
+- Datastore service persists HDD snapshots per player key (`src/net_bridge/datastore/HDDStore.luau`).
