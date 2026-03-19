@@ -77,17 +77,6 @@ end
 main()
 ```
 
-| Field | Type | Purpose |
-|---|---|---|
-| `imageLabel` | `ImageLabel` | **Required.** The GPU renders pixels here. |
-| `offOverlay` | `TextButton` | Shown while the machine is off. Clicking it boots the machine. |
-| `rebootButton` | `TextButton` | Calls `machine:reboot()` when activated. |
-| `shutdownButton` | `TextButton` | Calls `machine:shutdown()` when activated. |
-| `stageDot` | `Frame` | `BackgroundColor3` is set to green, amber, or red based on boot stage. |
-| `stageLabel` | `TextLabel` | `Text` is set to the current boot stage string. |
-
-Set `AUTO_POWER = true` at the top of the script to boot immediately on spawn, or `false` to require a manual trigger.
-
 ### PcSystem API
 
 ```lua
