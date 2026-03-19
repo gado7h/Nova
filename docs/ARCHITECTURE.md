@@ -1,4 +1,4 @@
-# Nova Architecture
+# Machina Architecture
 
 ## Boot Pipeline
 

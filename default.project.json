@@ -1,15 +1,22 @@
 {
-  "name": "nova",
+  "name": "Machina",
   "emitLegacyScripts": false,
   "tree": {
     "$className": "DataModel",
 
     "ReplicatedStorage": {
-      "$path": "src/machine"
-    },
-
-    "ServerScriptService": {
-      "$path": "src/server"
+      "platforms": {
+        "$path": "src/platforms"
+      },
+      "Config": {
+        "$path": "src/Config.luau"
+      },
+      "Host": {
+        "$path": "src/Host.client.luau"
+      },
+      "net_bridge": {
+        "$path": "src/net_bridge"
+      }
     }
   }
 }

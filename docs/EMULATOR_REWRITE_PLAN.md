@@ -2,7 +2,7 @@
 
 ## Goal
 
-Turn Nova from a host-driven virtual computer simulation into a system-accurate custom emulator where:
+Turn Machina from a host-driven virtual computer simulation into a system-accurate custom emulator where:
 
 - the CPU is the execution substrate for firmware and native guest code
 - devices are accessed through MMIO or port I/O instead of direct host shortcuts
@@ -15,7 +15,7 @@ This rewrite targets system accuracy rather than cycle accuracy. Correct boundar
 
 ### CPU
 
-- Architecture: `nova32`
+- Architecture: `machina32`
 - Endianness: little-endian
 - Register file: 16 architectural registers already modeled by the project
 - Core execution model: fetch -> decode -> execute on machine memory
@@ -95,7 +95,7 @@ The host runtime may still instantiate machine objects, but it should not direct
 
 ## Execution Model
 
-Nova should support two guest execution modes:
+Machina should support two guest execution modes:
 
 ### Native Guest Execution
 

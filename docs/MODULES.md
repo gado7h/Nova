@@ -63,6 +63,6 @@
 ## Server Services
 
 - `src/server/ServerScriptService/network/NetworkService.luau`
-  - Creates NovaNet remotes for save/load/sync operations.
+  - Creates MachinaNet remotes for save/load/sync operations.
 - `src/server/ServerScriptService/datastore/HDDStore.luau`
   - Persists virtual HDD snapshots in Roblox DataStore.

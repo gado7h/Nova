@@ -1,8 +1,7 @@
 # Project place file
-/nova.rbxlx
+/machina.rbxlx
 
 # Roblox Studio lock files
 /*.rbxlx.lock
 /*.rbxl.lock
-/skills
 sourcemap.json

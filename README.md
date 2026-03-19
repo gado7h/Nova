@@ -1,6 +1,6 @@
-# Nova
+# Machina
 
-Nova is a Roblox-based virtual machine project written in Luau. It emulates a small computer stack including firmware, bootloader, kernel, virtual filesystem, and userland shell.
+Machina is a Roblox-based virtual machine project written in Luau. It emulates a small computer stack including firmware, bootloader, kernel, virtual filesystem, and userland shell.
 
 ## Features
 
@@ -36,7 +36,7 @@ Nova is a Roblox-based virtual machine project written in Luau. It emulates a sm
 1. Install toolchain dependencies (via `rokit` and your local setup).
 2. Open the project in Roblox Studio.
 3. Sync source with Rojo.
-4. Run the game and observe the Nova boot sequence.
+4. Run the game and observe the Machina boot sequence.
 
 ## Style
 
