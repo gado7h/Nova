@@ -2,9 +2,8 @@
 
 local Players = game:GetService("Players")
 
-local ServerRoot = script.Parent:WaitForChild("ServerScriptService")
-local NetworkService = require(ServerRoot.network.NetworkService)
-local HDDStore = require(ServerRoot.datastore.HDDStore)
+local NetworkService = require(script.Parent.network.NetworkService)
+local HDDStore = require(script.Parent.datastore.HDDStore)
 
 local network = NetworkService.new()
 network:start()
