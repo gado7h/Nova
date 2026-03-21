@@ -30,7 +30,7 @@ jobs:
         run: rokit install --no-trust-check
 
       - name: Build with Rojo
-        run: rojo build default.project.json -o Machina.rbxlx
+        run: rojo build default.project.json -o Machina.rbxmx
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
