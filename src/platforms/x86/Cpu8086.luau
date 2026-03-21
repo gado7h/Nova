@@ -459,7 +459,7 @@ function Cpu8086:step()
 		self:setReg16(opcode - 0xB8, self:fetch16())
 	elseif opcode >= 0xB0 and opcode <= 0xB7 then
 		self:setReg8(opcode - 0xB0, self:fetch8())
-	--elseif opcode == 0x90 then
+		--elseif opcode == 0x90 then
 		-- nop
 	elseif opcode == 0xFA then
 		self:setFlag(FLAG_IF, false)

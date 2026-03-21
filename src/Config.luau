@@ -8,23 +8,23 @@ Config.EMULATION = {
 	PROFILE = "x86-bios",
 }
 
-Config.DISPLAY_REFRESH_HZ = 60 
+Config.DISPLAY_REFRESH_HZ = 60
 
-Config.SCREEN_W = 320 
-Config.SCREEN_H = 200 
+Config.SCREEN_W = 320
+Config.SCREEN_H = 200
 Config.TEXT_COLS = 80
 Config.TEXT_ROWS = 25
 
 Config.CHAR_W = 6
-Config.CHAR_H = 10 
+Config.CHAR_H = 10
 Config.GLYPH_W = 4
 Config.GLYPH_H = 8
-Config.PAD_X = 1 
-Config.PAD_Y = 1 
-Config.FONT_SMOOTHING = false 
+Config.PAD_X = 1
+Config.PAD_Y = 1
+Config.FONT_SMOOTHING = false
 
 --Storage
-Config.DISK_BLOCKS = 204800 
+Config.DISK_BLOCKS = 204800
 Config.DISK_MODEL = "Machina Virtual ATA"
 
 --Memory layout defaults
@@ -33,15 +33,15 @@ Config.DISK_MODEL = "Machina Virtual ATA"
 Config.PAGE_SIZE = 4096
 
 Config.ROM_BASE = 0x000F0000
-Config.ROM_SIZE = 0x00010000 
+Config.ROM_SIZE = 0x00010000
 
 Config.RAM_BASE = 0x00000000
-Config.RAM_SIZE = 0x000A0000 
+Config.RAM_SIZE = 0x000A0000
 
 Config.VRAM_BASE = 0x000B8000
-Config.VRAM_SIZE = 0x00008000 
+Config.VRAM_SIZE = 0x00008000
 
---Interrupt controller 
+--Interrupt controller
 --Defaults before the BIOS programs the PIC. X86 overrides these to the
 --real BIOS values (master 0x08 / slave 0x70).
 Config.PIC_VECTOR_BASE_MASTER = 0x20
@@ -57,7 +57,7 @@ Config.IRQ = {
 
 Config.TIMER = {
 	BASE_HZ = 1193182,
-	DEFAULT_DIVISOR = 65536, 
+	DEFAULT_DIVISOR = 65536,
 }
 
 --I/O port
@@ -86,26 +86,26 @@ Config.PORT = {
 	IDE_PRIMARY_CTRL = 0x03F6,
 }
 
---x86 BIOS subsystem 
+--x86 BIOS subsystem
 Config.X86 = {
-	HEARTBEAT_HZ = Config.DISPLAY_REFRESH_HZ, 
+	HEARTBEAT_HZ = Config.DISPLAY_REFRESH_HZ,
 	BOOT_CYCLES_PER_TICK = 1536,
 	RUN_CYCLES_PER_TICK = 1024,
 
 	ROM_BASE = 0x000F0000,
-	ROM_SIZE = 0x00010000, 
+	ROM_SIZE = 0x00010000,
 
 	LOW_RAM_BASE = 0x00000000,
-	LOW_RAM_SIZE = 0x000A0000, 
+	LOW_RAM_SIZE = 0x000A0000,
 
 	VIDEO_BASE = 0x000B8000,
-	VIDEO_SIZE = 0x00008000, 
+	VIDEO_SIZE = 0x00008000,
 
 	RESET_VECTOR_SEG = 0xF000,
 	RESET_VECTOR_OFF = 0xFFF0,
-	BIOS_ENTRY_OFFSET = 0x0100, 
+	BIOS_ENTRY_OFFSET = 0x0100,
 
-	BOOT_DRIVE = 0x80, 
+	BOOT_DRIVE = 0x80,
 	BOOT_SECTOR_LOAD_SEG = 0x0000,
 	BOOT_SECTOR_LOAD_OFF = 0x7C00,
 	KERNEL_LOAD_SEG = 0x1000,

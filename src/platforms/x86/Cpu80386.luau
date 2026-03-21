@@ -777,7 +777,7 @@ function Cpu80386:step()
 		self:_setRegByWidth(opcode - 0xB8, operandWidth, self:_fetchImmediate(operandWidth))
 	elseif opcode >= 0xB0 and opcode <= 0xB7 then
 		self:setReg8(opcode - 0xB0, self:fetch8())
-	--elseif opcode == 0x90 then		
+	--elseif opcode == 0x90 then
 	elseif opcode == 0xFA then
 		self:setFlag(FLAG_IF, false)
 	elseif opcode == 0xFB then
