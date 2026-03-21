@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
@@ -15,22 +19,25 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Install Rokit
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -sSf https://raw.githubusercontent.com/rojo-rbx/rokit/main/scripts/install.sh | bash
-          echo "$HOME/.rokit/bin" >> "$GITHUB_PATH"
-
-      - name: Verify Rokit
-        run: rokit --version
+      - name: Setup Rokit
+        uses: CompeyDev/setup-rokit@v0.1.2
+        with:
+          cache: true
 
       - name: Install toolchain
         run: rokit install --no-trust-check
 
+      - name: Verify toolchain
+        run: |
+          rokit --version
+          rojo --version
+
       - name: Build with Rojo
-        run: rojo build default.project.json -o Machina.rbxmx
+        run: rojo build default.project.json -o Machina.rbxlx
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
