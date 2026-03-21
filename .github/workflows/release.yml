@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rokit
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSf https://raw.githubusercontent.com/rojo-rbx/rokit/main/scripts/install.sh | bash
+          echo "$HOME/.rokit/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Rokit
+        run: rokit --version
+
+      - name: Install toolchain
+        run: rokit install --no-trust-check
+
+      - name: Build with Rojo
+        run: rojo build default.project.json -o Machina.rbxlx
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Machina.rbxlx
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
