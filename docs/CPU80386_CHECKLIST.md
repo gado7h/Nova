@@ -111,6 +111,8 @@ Diagnostics that now execute those images headlessly during boot diagnostics:
 - `cpu_pm_validation`
 - `cpu_exception_validation`
 
+These run when `Config.X86.DIAGNOSTICS.RUN_GUEST_CPU_VALIDATIONS = true`.
+
 ### CpuProtectedModeValidation
 
 Intended to verify:

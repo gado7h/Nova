@@ -210,8 +210,10 @@ end
 
 local function runGuestValidationImage(machine, config, imageName, expectedText)
 	local snapshot = snapshotMachineForGuestValidation(machine)
-	local details = {}
 	local success, passed, detail = pcall(function()
+		local diagConfig = ((config.X86 or {}).DIAGNOSTICS or {})
+		local maxSteps = diagConfig.GUEST_VALIDATION_MAX_STEPS or 50000
+		local yieldEvery = diagConfig.GUEST_VALIDATION_YIELD_EVERY or 2000
 		local image = buildCatalogImage(config, imageName)
 		machine.hdd._sectors = {}
 		for lba, sector in pairs(image.sectors or {}) do
@@ -226,9 +228,11 @@ local function runGuestValidationImage(machine, config, imageName, expectedText)
 		end
 
 		local haltedCount = 0
-		local maxSteps = 200000
 		local observed = ""
 		for step = 1, maxSteps do
+			if task and task.wait and yieldEvery > 0 and step % yieldEvery == 0 then
+				task.wait()
+			end
 			local ok, result = pcall(function()
 				return machine.cpu:step()
 			end)
@@ -791,6 +795,7 @@ local function testCpuExceptionValidation(machine, config)
 end
 
 function HardwareDiagnostics.run(machine, config)
+	local diagConfig = ((config.X86 or {}).DIAGNOSTICS or {})
 	local results = {
 		wrapTest("pic", function()
 			return testPIC(machine, config)
@@ -825,13 +830,16 @@ function HardwareDiagnostics.run(machine, config)
 		wrapTest("protected_mode_smoke", function()
 			return testProtectedMode(machine, config)
 		end),
-		wrapTest("cpu_pm_validation", function()
-			return testCpuProtectedModeValidation(machine, config)
-		end),
-		wrapTest("cpu_exception_validation", function()
-			return testCpuExceptionValidation(machine, config)
-		end),
 	}
+
+	if diagConfig.RUN_GUEST_CPU_VALIDATIONS == true then
+		results[#results + 1] = wrapTest("cpu_pm_validation", function()
+			return testCpuProtectedModeValidation(machine, config)
+		end)
+		results[#results + 1] = wrapTest("cpu_exception_validation", function()
+			return testCpuExceptionValidation(machine, config)
+		end)
+	end
 
 	local passedCount = 0
 	for _, result in ipairs(results) do

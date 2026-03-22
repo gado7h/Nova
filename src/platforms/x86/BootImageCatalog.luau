@@ -637,6 +637,16 @@ local function concatBytes(first, second)
 	return out
 end
 
+local function mergeSymbols(...)
+	local out = {}
+	for _, symbolTable in ipairs({ ... }) do
+		for name, value in pairs(symbolTable or {}) do
+			out[name] = value
+		end
+	end
+	return out
+end
+
 local function buildStandaloneBootImage(config, name, bootSource)
 	local biosArtifact = BiosRom.buildArtifact(config)
 	local bootArtifact = Assembler8086.compile(bootSource)
@@ -1247,16 +1257,6 @@ local function buildVgaPaletteValidation(config)
 		"DW 0xAA55",
 	}, "\n")
 	return buildStandaloneBootImage(config, "VgaPaletteValidation", source)
-end
-
-local function mergeSymbols(...)
-	local out = {}
-	for _, symbolTable in ipairs({ ... }) do
-		for name, value in pairs(symbolTable or {}) do
-			out[name] = value
-		end
-	end
-	return out
 end
 
 local function buildProtectedModeBringUp(config)
