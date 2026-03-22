@@ -18,6 +18,8 @@ Rendering is handled through a virtual VGA device with text and pixel modes, dis
 
 The locked emulator target and subsystem acceptance criteria are documented in [`docs/TARGET_MACHINE.md`](docs/TARGET_MACHINE.md).
 
+CPU behavior coverage and guest-visible CPU validation images are documented in [`docs/CPU80386_CHECKLIST.md`](docs/CPU80386_CHECKLIST.md).
+
 VGA fidelity and current implementation limits are documented in [`docs/VGA_EMULATION.md`](docs/VGA_EMULATION.md).
 
 MachinaOS is the default environment, providing a minimal operating system layer for interacting with the emulated hardware and experimenting with low-level software.

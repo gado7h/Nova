@@ -671,6 +671,447 @@ local function buildStandaloneBootImage(config, name, bootSource)
 	}
 end
 
+local function buildProtectedModeKernelImage(config, name, kernelSource)
+	local x86 = config.X86 or {}
+	local layout = {
+		kernelSectorStart = 2,
+		kernelSectorCount = 1,
+		fsSuperSector = 0,
+		rootDirSector = 0,
+		rootDirSectorCount = 0,
+		dataStartSector = 0,
+		fileCount = 0,
+	}
+
+	local stubArtifact
+	local kernelArtifact
+	local kernelBytes
+	local kernelSymbols
+	local bootSource
+	local kernelLoadLinear = (x86.KERNEL_LOAD_SEG or 0x1000) * 16
+	for _ = 1, 4 do
+		local placeholderStub =
+			Assembler8086.compile(buildProtectedModeStubSource(config, 0, kernelLoadLinear, kernelLoadLinear))
+		local pmOffset = #placeholderStub.bytes
+		local provisionalStub =
+			Assembler8086.compile(buildProtectedModeStubSource(config, pmOffset, kernelLoadLinear, kernelLoadLinear))
+		local gdtOffset = provisionalStub.symbols and provisionalStub.symbols.GDT or 0
+		local gdtLinear = kernelLoadLinear + gdtOffset
+		stubArtifact =
+			Assembler8086.compile(buildProtectedModeStubSource(config, pmOffset, kernelLoadLinear, gdtLinear))
+		pmOffset = #stubArtifact.bytes
+		if pmOffset ~= #placeholderStub.bytes then
+			stubArtifact = Assembler8086.compile(
+				buildProtectedModeStubSource(
+					config,
+					pmOffset,
+					kernelLoadLinear,
+					kernelLoadLinear + (stubArtifact.symbols and stubArtifact.symbols.GDT or 0)
+				)
+			)
+			pmOffset = #stubArtifact.bytes
+		end
+
+		kernelArtifact = Assembler8086.compile(kernelSource, {
+			origin = pmOffset,
+			defaultOperand32 = true,
+		})
+		kernelBytes = concatBytes(stubArtifact.bytes, kernelArtifact.bytes)
+		kernelSymbols = mergeSymbols(stubArtifact.symbols, kernelArtifact.symbols)
+		layout.kernelSectorCount = sectorCountForBytes(kernelBytes)
+
+		local kernelCHS = encodeCHSWord(x86, layout.kernelSectorStart)
+		local _, kernelHead = sectorToCHS(x86, layout.kernelSectorStart)
+		bootSource = table.concat({
+			"ORG 0x7C00",
+			"START:",
+			"  CLI",
+			"  XOR AX, AX",
+			"  MOV DS, AX",
+			"  MOV SS, AX",
+			"  MOV SP, 0x7C00",
+			"  MOV [BOOT_DRIVE], DL",
+			"  MOV SI, BOOT_MSG",
+			"  CALL PRINT_STRING",
+			"  MOV AX, " .. hex16(x86.KERNEL_LOAD_SEG or 0x1000),
+			"  MOV ES, AX",
+			"  MOV BX, 0x0000",
+			"  MOV AX, " .. hex16(bit32.bor(0x0200, layout.kernelSectorCount)),
+			"  MOV CX, " .. hex16(kernelCHS),
+			"  MOV DX, " .. hex16(bit32.bor((x86.BOOT_DRIVE or 0x80), bit32.lshift(kernelHead, 8))),
+			"  MOV DL, [BOOT_DRIVE]",
+			"  INT 0x13",
+			"  JC LOAD_FAIL",
+			"  PUSH " .. hex16(x86.KERNEL_LOAD_SEG or 0x1000),
+			"  PUSH 0x0000",
+			"  RETF",
+			"LOAD_FAIL:",
+			"  MOV SI, LOAD_FAIL_MSG",
+			"  CALL PRINT_STRING",
+			"BOOT_HANG:",
+			"  HLT",
+			"  JMP BOOT_HANG",
+			"PRINT_STRING:",
+			"  MOV AL, [SI]",
+			"  CMP AL, 0",
+			"  JE PRINT_DONE",
+			"  MOV AH, 0x0E",
+			"  INT 0x10",
+			"  INC SI",
+			"  JMP PRINT_STRING",
+			"PRINT_DONE:",
+			"  RET",
+			"BOOT_DRIVE:",
+			"  DB 0",
+			"BOOT_MSG:",
+			'  DB "Loading boot image...", 13, 10, 0',
+			"LOAD_FAIL_MSG:",
+			'  DB "Boot image read failure", 13, 10, 0',
+			"PADTO 0x7DFE, 0",
+			"DW 0xAA55",
+		}, "\n")
+		local bootArtifact = Assembler8086.compile(bootSource)
+		if #bootArtifact.bytes <= 512 then
+			break
+		end
+	end
+
+	local biosArtifact = BiosRom.buildArtifact(config)
+	local bootArtifact = Assembler8086.compile(bootSource)
+	assert(#bootArtifact.bytes <= 512, "external boot sector exceeds 512 bytes")
+
+	local sectors = {}
+	local bootSector = {}
+	for index = 1, 512 do
+		bootSector[index] = bootArtifact.bytes[index] or 0
+	end
+	sectors[0] = bootSector
+	writeChunk(sectors, layout.kernelSectorStart - 1, kernelBytes or {})
+
+	return {
+		name = name,
+		romBytes = BiosRom.buildROMBytes(config, biosArtifact),
+		sectors = sectors,
+		layout = layout,
+		files = {},
+		symbols = {
+			bios = biosArtifact.symbols,
+			bootSector = bootArtifact.symbols,
+			stub = stubArtifact and stubArtifact.symbols or {},
+			kernel = kernelSymbols or {},
+		},
+	}
+end
+
+local function buildCpuProtectedModeValidationSource()
+	return table.concat({
+		"PM_ENTRY:",
+		"  MOV AX, 0x0010",
+		"  MOV DS, AX",
+		"  MOV SS, AX",
+		"  MOV ESP, 0x00007B00",
+		"  CALL INIT_TEXT",
+		'  MOV ESI, BANNER',
+		"  CALL PRINT_STRING_PM",
+		"  CALL SETUP_IDT",
+		"  MOV EAX, 0x11223344",
+		"  CMP EAX, 0x11223344",
+		"  JNE FAIL_OP32",
+		"  MOV AX, 0x1357",
+		"  CMP AX, 0x1357",
+		"  JNE FAIL_OP16",
+		"  MOV EAX, SCRATCH32",
+		"  MOV EBX, 0xCAFEBABE",
+		"  DB 0x89, 0x18",
+		"  DB 0x8B, 0x08",
+		"  CMP ECX, 0xCAFEBABE",
+		"  JNE FAIL_ADDR32",
+		"  MOV SI, SCRATCH16",
+		"  MOV AX, 0x2468",
+		"  MOV WORD [SI], AX",
+		"  CMP WORD [SI], 0x2468",
+		"  JNE FAIL_ADDR16",
+		"  CALL NEAR_PROC",
+		"  CMP DWORD [NEAR_FLAG], 1",
+		"  JNE FAIL_NEAR",
+		"  DB 0xEA",
+		"  DD FAR_JUMP_TARGET",
+		"  DW 0x0008",
+		"AFTER_FAR_JUMP:",
+		"  CMP DWORD [FAR_JUMP_FLAG], 1",
+		"  JNE FAIL_FAR_JUMP",
+		"  DB 0x9A",
+		"  DD FAR_CALL_TARGET",
+		"  DW 0x0008",
+		"  CMP DWORD [FAR_CALL_FLAG], 1",
+		"  JNE FAIL_FAR_CALL",
+		"  INT 0x30",
+		"  CMP DWORD [INT30_FLAG], 1",
+		"  JNE FAIL_INT30",
+		'  MOV ESI, PASS_MSG',
+		"  CALL PRINT_STRING_PM",
+		"PASS_HANG:",
+		"  HLT",
+		"  JMP PASS_HANG",
+		"NEAR_PROC:",
+		"  MOV DWORD [NEAR_FLAG], 1",
+		"  RET",
+		"FAR_JUMP_TARGET:",
+		"  MOV DWORD [FAR_JUMP_FLAG], 1",
+		"  JMP AFTER_FAR_JUMP",
+		"FAR_CALL_TARGET:",
+		"  MOV DWORD [FAR_CALL_FLAG], 1",
+		"  RETF",
+		"INT30_HANDLER:",
+		"  MOV DWORD [INT30_FLAG], 1",
+		"  IRET",
+		"SETUP_IDT:",
+		"  LIDT [IDT_DESC]",
+		"  RET",
+		"INIT_TEXT:",
+		"  MOV AX, 0x0018",
+		"  MOV ES, AX",
+		"  XOR DI, DI",
+		"  MOV CX, 2000",
+		"INIT_CLEAR:",
+		"  MOV AL, ' '",
+		"  DB 0x26, 0x88, 0x05",
+		"  INC DI",
+		"  MOV AL, 0x07",
+		"  DB 0x26, 0x88, 0x05",
+		"  INC DI",
+		"  LOOP INIT_CLEAR",
+		"  XOR DI, DI",
+		"  RET",
+		"PRINT_STRING_PM:",
+		"  MOV AL, [SI]",
+		"  CMP AL, 0",
+		"  JE PRINT_DONE",
+		"  CALL PUTC",
+		"  INC SI",
+		"  JMP PRINT_STRING_PM",
+		"PRINT_DONE:",
+		"  RET",
+		"PUTC:",
+		"  CMP AL, 13",
+		"  JE PUTC_CR",
+		"  CMP AL, 10",
+		"  JE PUTC_LF",
+		"  DB 0x26, 0x88, 0x05",
+		"  INC DI",
+		"  MOV AL, 0x0A",
+		"  DB 0x26, 0x88, 0x05",
+		"  INC DI",
+		"  RET",
+		"PUTC_CR:",
+		"  RET",
+		"PUTC_LF:",
+		"  MOV AX, DI",
+		"  MOV BX, 160",
+		"  XOR DX, DX",
+		"  DIV BX",
+		"  INC AX",
+		"  MUL BX",
+		"  MOV DI, AX",
+		"  RET",
+		"FAIL_OP32:",
+		'  MOV ESI, FAIL_OP32_MSG',
+		"  JMP FAIL",
+		"FAIL_OP16:",
+		'  MOV ESI, FAIL_OP16_MSG',
+		"  JMP FAIL",
+		"FAIL_ADDR32:",
+		'  MOV ESI, FAIL_ADDR32_MSG',
+		"  JMP FAIL",
+		"FAIL_ADDR16:",
+		'  MOV ESI, FAIL_ADDR16_MSG',
+		"  JMP FAIL",
+		"FAIL_NEAR:",
+		'  MOV ESI, FAIL_NEAR_MSG',
+		"  JMP FAIL",
+		"FAIL_FAR_JUMP:",
+		'  MOV ESI, FAIL_FAR_JUMP_MSG',
+		"  JMP FAIL",
+		"FAIL_FAR_CALL:",
+		'  MOV ESI, FAIL_FAR_CALL_MSG',
+		"  JMP FAIL",
+		"FAIL_INT30:",
+		'  MOV ESI, FAIL_INT30_MSG',
+		"  JMP FAIL",
+		"FAIL:",
+		"  CALL PRINT_STRING_PM",
+		"FAIL_HANG:",
+		"  HLT",
+		"  JMP FAIL_HANG",
+		"BANNER:",
+		'  DB "machina cpu pm validation", 13, 10, 0',
+		"PASS_MSG:",
+		'  DB "cpu pm validation PASS", 13, 10, 0',
+		"FAIL_OP32_MSG:",
+		'  DB "FAIL op32", 13, 10, 0',
+		"FAIL_OP16_MSG:",
+		'  DB "FAIL op16", 13, 10, 0',
+		"FAIL_ADDR32_MSG:",
+		'  DB "FAIL addr32", 13, 10, 0',
+		"FAIL_ADDR16_MSG:",
+		'  DB "FAIL addr16", 13, 10, 0',
+		"FAIL_NEAR_MSG:",
+		'  DB "FAIL near call", 13, 10, 0',
+		"FAIL_FAR_JUMP_MSG:",
+		'  DB "FAIL far jump", 13, 10, 0',
+		"FAIL_FAR_CALL_MSG:",
+		'  DB "FAIL far call", 13, 10, 0',
+		"FAIL_INT30_MSG:",
+		'  DB "FAIL int30", 13, 10, 0',
+		"NEAR_FLAG:",
+		"  DD 0",
+		"FAR_JUMP_FLAG:",
+		"  DD 0",
+		"FAR_CALL_FLAG:",
+		"  DD 0",
+		"INT30_FLAG:",
+		"  DD 0",
+		"SCRATCH32:",
+		"  DD 0",
+		"SCRATCH16:",
+		"  DW 0",
+		"IDT:",
+		"  PADTO IDT + 0x180, 0",
+		"INT30_GATE:",
+		"  DW INT30_HANDLER",
+		"  DW 0x0008",
+		"  DB 0x00",
+		"  DB 0x8E",
+		"  DW 0x0000",
+		"IDT_END:",
+		"IDT_DESC:",
+		"  DW IDT_END - IDT - 1",
+		"  DD IDT",
+	}, "\n")
+end
+
+local function buildCpuExceptionValidationSource()
+	return table.concat({
+		"PM_ENTRY:",
+		"  MOV AX, 0x0010",
+		"  MOV DS, AX",
+		"  MOV SS, AX",
+		"  MOV ESP, 0x00007B00",
+		"  CALL INIT_TEXT",
+		'  MOV ESI, BANNER',
+		"  CALL PRINT_STRING_PM",
+		"  LIDT [IDT_DESC]",
+		"  DB 0x0F, 0x0B",
+		"  CMP DWORD [UD_FLAG], 1",
+		"  JNE FAIL_UD",
+		"  INT 0x30",
+		"  CMP DWORD [INT30_FLAG], 1",
+		"  JNE FAIL_INT30",
+		'  MOV ESI, PASS_MSG',
+		"  CALL PRINT_STRING_PM",
+		"PASS_HANG:",
+		"  HLT",
+		"  JMP PASS_HANG",
+		"UD_HANDLER:",
+		"  POP EAX",
+		"  ADD EAX, 2",
+		"  PUSH EAX",
+		"  MOV DWORD [UD_FLAG], 1",
+		"  IRET",
+		"INT30_HANDLER:",
+		"  MOV DWORD [INT30_FLAG], 1",
+		"  IRET",
+		"INIT_TEXT:",
+		"  MOV AX, 0x0018",
+		"  MOV ES, AX",
+		"  XOR DI, DI",
+		"  MOV CX, 2000",
+		"INIT_CLEAR:",
+		"  MOV AL, ' '",
+		"  DB 0x26, 0x88, 0x05",
+		"  INC DI",
+		"  MOV AL, 0x07",
+		"  DB 0x26, 0x88, 0x05",
+		"  INC DI",
+		"  LOOP INIT_CLEAR",
+		"  XOR DI, DI",
+		"  RET",
+		"PRINT_STRING_PM:",
+		"  MOV AL, [SI]",
+		"  CMP AL, 0",
+		"  JE PRINT_DONE",
+		"  CALL PUTC",
+		"  INC SI",
+		"  JMP PRINT_STRING_PM",
+		"PRINT_DONE:",
+		"  RET",
+		"PUTC:",
+		"  CMP AL, 13",
+		"  JE PUTC_CR",
+		"  CMP AL, 10",
+		"  JE PUTC_LF",
+		"  DB 0x26, 0x88, 0x05",
+		"  INC DI",
+		"  MOV AL, 0x0E",
+		"  DB 0x26, 0x88, 0x05",
+		"  INC DI",
+		"  RET",
+		"PUTC_CR:",
+		"  RET",
+		"PUTC_LF:",
+		"  MOV AX, DI",
+		"  MOV BX, 160",
+		"  XOR DX, DX",
+		"  DIV BX",
+		"  INC AX",
+		"  MUL BX",
+		"  MOV DI, AX",
+		"  RET",
+		"FAIL_UD:",
+		'  MOV ESI, FAIL_UD_MSG',
+		"  JMP FAIL",
+		"FAIL_INT30:",
+		'  MOV ESI, FAIL_INT30_MSG',
+		"  JMP FAIL",
+		"FAIL:",
+		"  CALL PRINT_STRING_PM",
+		"FAIL_HANG:",
+		"  HLT",
+		"  JMP FAIL_HANG",
+		"BANNER:",
+		'  DB "machina cpu exception validation", 13, 10, 0',
+		"PASS_MSG:",
+		'  DB "cpu exception validation PASS", 13, 10, 0',
+		"FAIL_UD_MSG:",
+		'  DB "FAIL invalid opcode exception", 13, 10, 0',
+		"FAIL_INT30_MSG:",
+		'  DB "FAIL software interrupt", 13, 10, 0',
+		"UD_FLAG:",
+		"  DD 0",
+		"INT30_FLAG:",
+		"  DD 0",
+		"IDT:",
+		"  PADTO IDT + 0x30, 0",
+		"UD_GATE:",
+		"  DW UD_HANDLER",
+		"  DW 0x0008",
+		"  DB 0x00",
+		"  DB 0x8E",
+		"  DW 0x0000",
+		"  PADTO IDT + 0x180, 0",
+		"INT30_GATE:",
+		"  DW INT30_HANDLER",
+		"  DW 0x0008",
+		"  DB 0x00",
+		"  DB 0x8E",
+		"  DW 0x0000",
+		"IDT_END:",
+		"IDT_DESC:",
+		"  DW IDT_END - IDT - 1",
+		"  DD IDT",
+	}, "\n")
+end
+
 local function buildVgaTextValidation(config)
 	local source = table.concat({
 		"ORG 0x7C00",
@@ -857,137 +1298,15 @@ local function mergeSymbols(...)
 end
 
 local function buildProtectedModeBringUp(config)
-	local x86 = config.X86 or {}
-	local layout = {
-		kernelSectorStart = 2,
-		kernelSectorCount = 1,
-		fsSuperSector = 0,
-		rootDirSector = 0,
-		rootDirSectorCount = 0,
-		dataStartSector = 0,
-		fileCount = 0,
-	}
+	return buildProtectedModeKernelImage(config, "ProtectedModeBringUp", buildProtectedModeMonitorSource())
+end
 
-	local stubArtifact
-	local monitorArtifact
-	local kernelBytes
-	local kernelSymbols
-	local bootSource
-	local kernelLoadLinear = (x86.KERNEL_LOAD_SEG or 0x1000) * 16
-	for _ = 1, 4 do
-		local placeholderStub =
-			Assembler8086.compile(buildProtectedModeStubSource(config, 0, kernelLoadLinear, kernelLoadLinear))
-		local pmOffset = #placeholderStub.bytes
-		local provisionalStub =
-			Assembler8086.compile(buildProtectedModeStubSource(config, pmOffset, kernelLoadLinear, kernelLoadLinear))
-		local gdtOffset = provisionalStub.symbols and provisionalStub.symbols.GDT or 0
-		local gdtLinear = kernelLoadLinear + gdtOffset
-		stubArtifact =
-			Assembler8086.compile(buildProtectedModeStubSource(config, pmOffset, kernelLoadLinear, gdtLinear))
-		pmOffset = #stubArtifact.bytes
-		if pmOffset ~= #placeholderStub.bytes then
-			stubArtifact = Assembler8086.compile(
-				buildProtectedModeStubSource(
-					config,
-					pmOffset,
-					kernelLoadLinear,
-					kernelLoadLinear + (stubArtifact.symbols and stubArtifact.symbols.GDT or 0)
-				)
-			)
-			pmOffset = #stubArtifact.bytes
-		end
-		monitorArtifact = Assembler8086.compile(buildProtectedModeMonitorSource(), {
-			origin = pmOffset,
-			defaultOperand32 = true,
-		})
-		kernelBytes = concatBytes(stubArtifact.bytes, monitorArtifact.bytes)
-		kernelSymbols = mergeSymbols(stubArtifact.symbols, monitorArtifact.symbols)
-		layout.kernelSectorCount = sectorCountForBytes(kernelBytes)
+local function buildCpuProtectedModeValidation(config)
+	return buildProtectedModeKernelImage(config, "CpuProtectedModeValidation", buildCpuProtectedModeValidationSource())
+end
 
-		local kernelCHS = encodeCHSWord(x86, layout.kernelSectorStart)
-		local _, kernelHead = sectorToCHS(x86, layout.kernelSectorStart)
-		bootSource = table.concat({
-			"ORG 0x7C00",
-			"START:",
-			"  CLI",
-			"  XOR AX, AX",
-			"  MOV DS, AX",
-			"  MOV SS, AX",
-			"  MOV SP, 0x7C00",
-			"  MOV [BOOT_DRIVE], DL",
-			"  MOV SI, BOOT_MSG",
-			"  CALL PRINT_STRING",
-			"  MOV AX, " .. hex16(x86.KERNEL_LOAD_SEG or 0x1000),
-			"  MOV ES, AX",
-			"  MOV BX, 0x0000",
-			"  MOV AX, " .. hex16(bit32.bor(0x0200, layout.kernelSectorCount)),
-			"  MOV CX, " .. hex16(kernelCHS),
-			"  MOV DX, " .. hex16(bit32.bor((x86.BOOT_DRIVE or 0x80), bit32.lshift(kernelHead, 8))),
-			"  MOV DL, [BOOT_DRIVE]",
-			"  INT 0x13",
-			"  JC LOAD_FAIL",
-			"  PUSH " .. hex16(x86.KERNEL_LOAD_SEG or 0x1000),
-			"  PUSH 0x0000",
-			"  RETF",
-			"LOAD_FAIL:",
-			"  MOV SI, LOAD_FAIL_MSG",
-			"  CALL PRINT_STRING",
-			"BOOT_HANG:",
-			"  HLT",
-			"  JMP BOOT_HANG",
-			"PRINT_STRING:",
-			"  MOV AL, [SI]",
-			"  CMP AL, 0",
-			"  JE PRINT_DONE",
-			"  MOV AH, 0x0E",
-			"  INT 0x10",
-			"  INC SI",
-			"  JMP PRINT_STRING",
-			"PRINT_DONE:",
-			"  RET",
-			"BOOT_DRIVE:",
-			"  DB 0",
-			"BOOT_MSG:",
-			'  DB "Loading boot image...", 13, 10, 0',
-			"LOAD_FAIL_MSG:",
-			'  DB "Boot image read failure", 13, 10, 0',
-			"PADTO 0x7DFE, 0",
-			"DW 0xAA55",
-		}, "\n")
-		local bootArtifact = Assembler8086.compile(bootSource)
-		if #bootArtifact.bytes <= 512 then
-			break
-		end
-	end
-
-	local biosArtifact = BiosRom.buildArtifact(config)
-	assert(type(bootSource) == "string", "external boot sector source was not generated")
-	assert(type(kernelBytes) == "table", "external kernel image was not generated")
-	local bootArtifact = Assembler8086.compile(bootSource)
-	assert(#bootArtifact.bytes <= 512, "external boot sector exceeds 512 bytes")
-
-	local sectors = {}
-	local bootSector = {}
-	for index = 1, 512 do
-		bootSector[index] = bootArtifact.bytes[index] or 0
-	end
-	sectors[0] = bootSector
-	writeChunk(sectors, layout.kernelSectorStart - 1, kernelBytes or {})
-
-	return {
-		name = "ProtectedModeBringUp",
-		romBytes = BiosRom.buildROMBytes(config, biosArtifact),
-		sectors = sectors,
-		layout = layout,
-		files = {},
-		symbols = {
-			bios = biosArtifact.symbols,
-			bootSector = bootArtifact.symbols,
-			stub = stubArtifact and stubArtifact.symbols or {},
-			monitor = monitorArtifact and monitorArtifact.symbols or {},
-			kernel = kernelSymbols or {},
-		},
-	}
+local function buildCpuExceptionValidation(config)
+	return buildProtectedModeKernelImage(config, "CpuExceptionValidation", buildCpuExceptionValidationSource())
 end
 
 BootImageCatalog.ProtectedModeBringUp = {
@@ -1018,6 +1337,16 @@ BootImageCatalog.VgaFontValidation = {
 BootImageCatalog.VgaPaletteValidation = {
 	name = "VgaPaletteValidation",
 	build = buildVgaPaletteValidation,
+}
+
+BootImageCatalog.CpuProtectedModeValidation = {
+	name = "CpuProtectedModeValidation",
+	build = buildCpuProtectedModeValidation,
+}
+
+BootImageCatalog.CpuExceptionValidation = {
+	name = "CpuExceptionValidation",
+	build = buildCpuExceptionValidation,
 }
 
 return BootImageCatalog

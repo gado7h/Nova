@@ -534,6 +534,29 @@ function Cpu80386:_sub(width, a, b)
 	return result
 end
 
+function Cpu80386:_currentPrivilegeLevel()
+	return bit32.band(self.seg.CS or 0, 0x3)
+end
+
+function Cpu80386:_raiseException(vector, message)
+	self._lastError = tostring(message)
+	self.halted = false
+	self._faultDepth = (self._faultDepth or 0) + 1
+	if self._faultDepth > 1 then
+		self._faultDepth = self._faultDepth - 1
+		error(self._lastError)
+	end
+
+	local ok, result = pcall(function()
+		return self:_invokeInterrupt(vector, false)
+	end)
+	self._faultDepth = self._faultDepth - 1
+	if ok then
+		return true
+	end
+	error(self._lastError .. ": " .. tostring(result))
+end
+
 function Cpu80386:_decodeDescriptor(selector)
 	local value = (tonumber(selector) or 0) % 0x10000
 	if value == 0 then
@@ -569,15 +592,73 @@ function Cpu80386:_decodeDescriptor(selector)
 	end
 
 	local base = b2 + b3 * 0x100 + b4 * 0x10000 + b7 * 0x1000000
+	local descriptorType = bit32.band(b5, 0x1F)
+	local isCodeData = bit32.band(b5, 0x10) ~= 0
+	local executable = bit32.band(b5, 0x08) ~= 0
+	local readableOrWritable = bit32.band(b5, 0x02) ~= 0
+	local conformingOrExpandDown = bit32.band(b5, 0x04) ~= 0
 	return {
 		selector = value,
 		base = base,
 		limit = limit,
 		access = b5,
 		flags = b6,
+		dpl = bit32.band(bit32.rshift(b5, 5), 0x03),
+		system = not isCodeData,
+		type = descriptorType,
+		executable = executable,
+		readable = executable and readableOrWritable,
+		writable = (not executable) and readableOrWritable,
+		conforming = executable and conformingOrExpandDown,
+		expandDown = (not executable) and conformingOrExpandDown,
 		default32 = bit32.band(b6, 0x40) ~= 0,
 		present = true,
 	}
+end
+
+function Cpu80386:_validateSegmentLoad(name, selector, descriptor)
+	if not descriptor then
+		error("missing descriptor for " .. tostring(name))
+	end
+
+	if descriptor.system then
+		error("system descriptor cannot be loaded into " .. tostring(name))
+	end
+
+	local selectorValue = (tonumber(selector) or 0) % 0x10000
+	local rpl = bit32.band(selectorValue, 0x03)
+	local cpl = self:_currentPrivilegeLevel()
+
+	if name == "CS" then
+		if not descriptor.executable then
+			error("CS must reference a code segment")
+		end
+		if descriptor.conforming then
+			if cpl < descriptor.dpl then
+				error("conforming code segment privilege violation")
+			end
+		elseif descriptor.dpl ~= cpl or rpl ~= cpl then
+			error("non-conforming code segment privilege violation")
+		end
+		return
+	end
+
+	if name == "SS" then
+		if descriptor.executable or not descriptor.writable then
+			error("SS must reference a writable data segment")
+		end
+		if descriptor.dpl ~= cpl or rpl ~= cpl then
+			error("stack segment privilege violation")
+		end
+		return
+	end
+
+	if descriptor.executable and not descriptor.readable then
+		error(tostring(name) .. " cannot reference execute-only code")
+	end
+	if not descriptor.executable and rpl > descriptor.dpl then
+		error(tostring(name) .. " selector RPL exceeds DPL")
+	end
 end
 
 function Cpu80386:_segmentCacheFor(segment)
@@ -635,10 +716,46 @@ function Cpu80386:setSeg(code, value)
 		if not descriptor then
 			error(err or "invalid protected-mode selector")
 		end
+		self:_validateSegmentLoad(name, value, descriptor)
 		self.segCache[name] = descriptor
 	else
 		self:_syncRealModeSegment(name)
 	end
+end
+
+function Cpu80386:_farPointerFromMemory(decoded, width)
+	if decoded.mod == 3 then
+		error("far pointer operand requires memory")
+	end
+	local segment, offset = self:_effectiveAddress(decoded)
+	local targetOffset
+	local targetSelectorOffset
+	if width == 32 then
+		targetOffset = self:readMem32(segment, offset)
+		targetSelectorOffset = offset + 4
+	else
+		targetOffset = self:readMem16(segment, offset)
+		targetSelectorOffset = offset + 2
+	end
+	local targetSelector = self:readMem16(segment, targetSelectorOffset)
+	return targetOffset, targetSelector
+end
+
+function Cpu80386:_farJump(selector, offset)
+	self:setSeg(1, selector)
+	self:_setInstructionPointer(offset)
+end
+
+function Cpu80386:_farCall(selector, offset, operandWidth)
+	local returnIP = self:_currentIP()
+	if operandWidth == 32 then
+		self:push32(self.seg.CS)
+		self:push32(returnIP)
+	else
+		self:push16(self.seg.CS)
+		self:push16(returnIP % 0x10000)
+	end
+	self:_farJump(selector, offset)
 end
 
 function Cpu80386:_loadTableRegister(decoded, target)
@@ -681,6 +798,7 @@ function Cpu80386:_decodeInterruptGate(vector)
 		offset = offsetLo + offsetHi * 0x10000,
 		trapGate = gateType == 0x07 or gateType == 0x0F,
 		gate32 = gateType == 0x0E or gateType == 0x0F,
+		dpl = bit32.band(bit32.rshift(typeAttr, 5), 0x03),
 	}
 end
 
@@ -690,6 +808,12 @@ function Cpu80386:_invokeInterrupt(vector, hardware)
 		local gate, err = self:_decodeInterruptGate(vector)
 		if not gate then
 			error(string.format("protected-mode interrupt 0x%02X failed: %s", vector, tostring(err)))
+		end
+		if hardware and not self:getFlag(FLAG_IF) then
+			return false
+		end
+		if not hardware and self:_currentPrivilegeLevel() > gate.dpl then
+			return self:_raiseException(13, string.format("software interrupt privilege violation vector=0x%02X", vector))
 		end
 
 		if gate.gate32 then
@@ -764,10 +888,10 @@ function Cpu80386:step()
 					self:_syncRealModeCaches()
 				end
 			else
-				error(string.format("unsupported 0F 01 group /%d", decoded.reg))
+				self:_raiseException(6, string.format("unsupported 0F 01 group /%d", decoded.reg))
 			end
 		else
-			error(string.format("unsupported 0F opcode 0x%02X", extended))
+			self:_raiseException(6, string.format("unsupported 0F opcode 0x%02X", extended))
 		end
 		self.stats.instructions = self.stats.instructions + 1
 		return self._lastStep.opcode
@@ -896,11 +1020,14 @@ function Cpu80386:step()
 	elseif opcode == 0xE9 then
 		local rel = operandWidth == 32 and signExtend32(self:fetch32()) or signExtend16(self:fetch16())
 		self:_setInstructionPointer(self:_currentIP() + rel)
-	elseif opcode == 0xEA then
-		local offset = self:fetch16()
+	elseif opcode == 0x9A then
+		local offset = operandWidth == 32 and self:fetch32() or self:fetch16()
 		local segment = self:fetch16()
-		self:setSeg(1, segment)
-		self:_setInstructionPointer(offset)
+		self:_farCall(segment, offset, operandWidth)
+	elseif opcode == 0xEA then
+		local offset = operandWidth == 32 and self:fetch32() or self:fetch16()
+		local segment = self:fetch16()
+		self:_farJump(segment, offset)
 	elseif opcode == 0xEB then
 		local rel = signExtend8(self:fetch8())
 		self:_setInstructionPointer(self:_currentIP() + rel)
@@ -934,10 +1061,16 @@ function Cpu80386:step()
 				self:push16(returnIP % 0x10000)
 			end
 			self:_setInstructionPointer(self:_readRMByWidth(decoded, operandWidth))
+		elseif decoded.reg == 3 then
+			local offset, selector = self:_farPointerFromMemory(decoded, operandWidth)
+			self:_farCall(selector, offset, operandWidth)
 		elseif decoded.reg == 4 then
 			self:_setInstructionPointer(self:_readRMByWidth(decoded, operandWidth))
+		elseif decoded.reg == 5 then
+			local offset, selector = self:_farPointerFromMemory(decoded, operandWidth)
+			self:_farJump(selector, offset)
 		else
-			error(string.format("unsupported FF group /%d at %04X:%04X", decoded.reg, self.seg.CS, startIP))
+			self:_raiseException(6, string.format("unsupported FF group /%d at %04X:%04X", decoded.reg, self.seg.CS, startIP))
 		end
 	elseif opcode == 0xC3 then
 		if operandWidth == 32 then
@@ -994,8 +1127,7 @@ function Cpu80386:step()
 		self:_portWriteByWidth(port, operandWidth, self:_getRegByWidth(0, operandWidth))
 	else
 		self._lastError = string.format("unsupported opcode 0x%02X at %04X:%08X", opcode, self.seg.CS, startIP)
-		self.halted = true
-		error(self._lastError)
+		self:_raiseException(6, self._lastError)
 	end
 
 	self.stats.instructions = self.stats.instructions + 1
