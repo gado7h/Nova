@@ -1,4 +1,6 @@
 local ProtectedModeSelfTest = require(script.Parent.ProtectedModeSelfTest)
+local BiosInterrupts = require(script.Parent.BiosInterrupts)
+local BootImageCatalog = require(script.Parent.BootImageCatalog)
 
 local HardwareDiagnostics = {}
 
@@ -48,6 +50,27 @@ local function restoreStats(device, snapshot)
 	end
 end
 
+local function snapshotObjectState(object, excluded)
+	local snapshot = {}
+	for key, value in pairs(object) do
+		if not (excluded and excluded[key]) and type(value) ~= "function" then
+			snapshot[key] = deepCopy(value)
+		end
+	end
+	return snapshot
+end
+
+local function restoreObjectState(object, snapshot, excluded)
+	for key, value in pairs(object) do
+		if not (excluded and excluded[key]) and type(value) ~= "function" and snapshot[key] == nil then
+			object[key] = nil
+		end
+	end
+	for key, value in pairs(snapshot) do
+		object[key] = deepCopy(value)
+	end
+end
+
 local function formatHex(value, width)
 	local digits = width or 2
 	return string.format("0x%0" .. tostring(digits) .. "X", (tonumber(value) or 0) % (2 ^ (digits * 4)))
@@ -73,6 +96,176 @@ local function restorePIC(pic, snapshot)
 	pic.master = deepCopy(snapshot.master)
 	pic.slave = deepCopy(snapshot.slave)
 	restoreStats(pic, snapshot.stats)
+end
+
+local function snapshotMachineForGuestValidation(machine)
+	return {
+		cpu = snapshotObjectState(machine.cpu, {
+			bus = true,
+			config = true,
+			x86 = true,
+			_bios = true,
+		}),
+		cpuBios = machine.cpu._bios,
+		ram = snapshotObjectState(machine.ram, {
+			config = true,
+		}),
+		rom = snapshotObjectState(machine.rom, {
+			config = true,
+		}),
+		hdd = snapshotObjectState(machine.hdd, {
+			config = true,
+			_bus = true,
+		}),
+		gpu = snapshotObjectState(machine.gpu, {
+			config = true,
+			_bus = true,
+			_pixelBuffer = true,
+		}),
+		keyboard = snapshotObjectState(machine.keyboard, {
+			config = true,
+			_bus = true,
+		}),
+		pic = snapshotPIC(machine.bus.pic),
+		timer = snapshotObjectState(machine.bus.timer, {
+			config = true,
+			_bus = true,
+		}),
+		busStats = copyStats(machine.bus),
+		busFault = deepCopy(machine.bus:peekFault()),
+	}
+end
+
+local function restoreMachineAfterGuestValidation(machine, snapshot)
+	restoreObjectState(machine.cpu, snapshot.cpu, {
+		bus = true,
+		config = true,
+		x86 = true,
+		_bios = true,
+	})
+	machine.cpu:attachBIOS(snapshot.cpuBios)
+	restoreObjectState(machine.ram, snapshot.ram, {
+		config = true,
+	})
+	restoreObjectState(machine.rom, snapshot.rom, {
+		config = true,
+	})
+	restoreObjectState(machine.hdd, snapshot.hdd, {
+		config = true,
+		_bus = true,
+	})
+	restoreObjectState(machine.gpu, snapshot.gpu, {
+		config = true,
+		_bus = true,
+		_pixelBuffer = true,
+	})
+	restoreObjectState(machine.keyboard, snapshot.keyboard, {
+		config = true,
+		_bus = true,
+	})
+	restorePIC(machine.bus.pic, snapshot.pic)
+	restoreObjectState(machine.bus.timer, snapshot.timer, {
+		config = true,
+		_bus = true,
+	})
+	restoreStats(machine.bus, snapshot.busStats)
+	machine.bus._fault = deepCopy(snapshot.busFault)
+	if machine.gpu and type(machine.gpu.flush) == "function" then
+		machine.gpu:flush()
+	end
+end
+
+local function buildCatalogImage(config, imageName)
+	local entry = BootImageCatalog[imageName]
+	assert(entry, "unknown guest validation image: " .. tostring(imageName))
+	if type(entry) == "function" then
+		return entry(config)
+	end
+	if type(entry) == "table" and type(entry.build) == "function" then
+		return entry.build(config)
+	end
+	if type(entry) == "table" then
+		return entry
+	end
+	error("invalid guest validation image entry: " .. tostring(imageName))
+end
+
+local function readGuestTextRows(machine, config, rowCount)
+	local x86 = config.X86 or {}
+	local cols = config.TEXT_COLS or 80
+	local rows = rowCount or (config.TEXT_ROWS or 25)
+	local textBase = x86.TEXT_BUFFER_BASE or 0xB8000
+	local out = {}
+	for row = 0, rows - 1 do
+		local chars = {}
+		for col = 0, cols - 1 do
+			local byteValue = machine.bus:memRead(textBase + (row * cols + col) * 2)
+			local ch = byteValue >= 32 and byteValue <= 126 and string.char(byteValue) or " "
+			chars[#chars + 1] = ch
+		end
+		out[#out + 1] = table.concat(chars):gsub("%s+$", "")
+	end
+	return out
+end
+
+local function runGuestValidationImage(machine, config, imageName, expectedText)
+	local snapshot = snapshotMachineForGuestValidation(machine)
+	local details = {}
+	local success, passed, detail = pcall(function()
+		local image = buildCatalogImage(config, imageName)
+		machine.hdd._sectors = {}
+		for lba, sector in pairs(image.sectors or {}) do
+			machine.hdd:writeSector(lba, sector)
+		end
+		machine.rom:flash(image.romBytes or {})
+		machine.cpu:reset()
+		machine.cpu:attachBIOS(BiosInterrupts.new(machine, {}, image))
+		if machine.bus and machine.bus.timer then
+			machine.bus.timer._enabled = false
+			machine.bus.timer._irqEnabled = false
+		end
+
+		local haltedCount = 0
+		local maxSteps = 200000
+		local observed = ""
+		for step = 1, maxSteps do
+			local ok, result = pcall(function()
+				return machine.cpu:step()
+			end)
+			if not ok then
+				local rows = readGuestTextRows(machine, config, 4)
+				return false, string.format("fault at step=%d err=%s text=%s", step, tostring(result), table.concat(rows, " | "))
+			end
+
+			if step % 64 == 0 or result == "HLT" then
+				local rows = readGuestTextRows(machine, config, 6)
+				observed = table.concat(rows, "\n")
+				if observed:find(expectedText, 1, true) then
+					return true, string.format("matched '%s' after %d steps", expectedText, step)
+				end
+				if observed:find("FAIL", 1, true) then
+					return false, string.format("guest reported failure after %d steps: %s", step, table.concat(rows, " | "))
+				end
+			end
+
+			if result == "HLT" then
+				haltedCount = haltedCount + 1
+				if haltedCount >= 16 then
+					break
+				end
+			else
+				haltedCount = 0
+			end
+		end
+
+		local rows = readGuestTextRows(machine, config, 6)
+		return false, string.format("timeout waiting for '%s': %s", expectedText, table.concat(rows, " | "))
+	end)
+	restoreMachineAfterGuestValidation(machine, snapshot)
+	if not success then
+		return false, tostring(passed)
+	end
+	return passed, detail
 end
 
 local function testPIC(machine, config)
@@ -589,6 +782,14 @@ local function testProtectedMode(machine, config)
 	return ProtectedModeSelfTest.run(machine, config)
 end
 
+local function testCpuProtectedModeValidation(machine, config)
+	return runGuestValidationImage(machine, config, "CpuProtectedModeValidation", "cpu pm validation PASS")
+end
+
+local function testCpuExceptionValidation(machine, config)
+	return runGuestValidationImage(machine, config, "CpuExceptionValidation", "cpu exception validation PASS")
+end
+
 function HardwareDiagnostics.run(machine, config)
 	local results = {
 		wrapTest("pic", function()
@@ -623,6 +824,12 @@ function HardwareDiagnostics.run(machine, config)
 		end),
 		wrapTest("protected_mode_smoke", function()
 			return testProtectedMode(machine, config)
+		end),
+		wrapTest("cpu_pm_validation", function()
+			return testCpuProtectedModeValidation(machine, config)
+		end),
+		wrapTest("cpu_exception_validation", function()
+			return testCpuExceptionValidation(machine, config)
 		end),
 	}
 

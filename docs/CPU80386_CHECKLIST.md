@@ -46,58 +46,58 @@ Privilege behavior in Machina's current target is therefore intentionally narrow
 
 ### Operand / Address Size
 
-- [ ] default operand size follows current code-segment default
-- [ ] `0x66` operand-size override flips between `16` and `32`
-- [ ] default address size follows current code-segment default
-- [ ] `0x67` address-size override flips between `16` and `32`
-- [ ] `32`-bit ModRM + SIB addressing works for supported forms
-- [ ] `16`-bit addressing still works inside default-`32` code when overridden
+- [x] default operand size follows current code-segment default
+- [x] `0x66` operand-size override flips between `16` and `32`
+- [x] default address size follows current code-segment default
+- [x] `0x67` address-size override flips between `16` and `32`
+- [x] `32`-bit ModRM + SIB addressing works for supported forms
+- [x] `16`-bit addressing still works inside default-`32` code when overridden
 
 ### Core Data Movement
 
-- [ ] `MOV r, imm`
-- [ ] `MOV r/m, r`
-- [ ] `MOV r, r/m`
-- [ ] `MOV segment, r/m16`
-- [ ] `MOV r/m16, segment`
-- [ ] `PUSH` / `POP`
+- [x] `MOV r, imm`
+- [x] `MOV r/m, r`
+- [x] `MOV r, r/m`
+- [x] `MOV segment, r/m16`
+- [x] `MOV r/m16, segment`
+- [x] `PUSH` / `POP`
 
 ### Arithmetic / Logic
 
-- [ ] `ADD`
-- [ ] `SUB`
-- [ ] `CMP`
-- [ ] `XOR`
-- [ ] flags update correctly for implemented widths
+- [x] `ADD`
+- [x] `SUB`
+- [x] `CMP`
+- [x] `XOR`
+- [x] flags update correctly for implemented widths
 
 ### Control Transfer
 
-- [ ] near `CALL`
-- [ ] near `JMP`
-- [ ] near `RET`
-- [ ] far immediate `CALL`
-- [ ] far immediate `JMP`
-- [ ] far indirect `CALL`
-- [ ] far indirect `JMP`
-- [ ] `RETF`
-- [ ] `IRET`
+- [x] near `CALL`
+- [x] near `JMP`
+- [x] near `RET`
+- [x] far immediate `CALL`
+- [x] far immediate `JMP`
+- [x] far indirect `CALL` (memory far pointer forms)
+- [x] far indirect `JMP` (memory far pointer forms)
+- [x] `RETF`
+- [x] `IRET`
 
 ### Protected Mode
 
-- [ ] `LGDT`
-- [ ] `LIDT`
-- [ ] `LMSW`
-- [ ] protected-mode segment loading through GDT descriptors
-- [ ] descriptor present / type validation
-- [ ] code-segment default-size behavior
+- [x] `LGDT`
+- [x] `LIDT`
+- [x] `LMSW`
+- [x] protected-mode segment loading through GDT descriptors for the locked ring-`0` target
+- [x] descriptor present / basic code-data type validation
+- [x] code-segment default-size behavior
 
 ### Interrupts / Exceptions
 
-- [ ] software interrupt dispatch through IDT
+- [x] software interrupt dispatch through IDT
 - [ ] hardware interrupt dispatch through IDT
 - [ ] interrupt vs trap gate IF behavior
-- [ ] invalid opcode exception path for unsupported opcodes
-- [ ] stack frame shape matches the implemented gate width
+- [x] invalid opcode exception path for unsupported opcodes
+- [x] stack frame shape matches the implemented ring-`0` gate width
 
 ## Guest-Visible CPU Self-Tests
 
@@ -105,6 +105,11 @@ Bundled guest-visible CPU validation images:
 
 - `CpuProtectedModeValidation`
 - `CpuExceptionValidation`
+
+Diagnostics that now execute those images headlessly during boot diagnostics:
+
+- `cpu_pm_validation`
+- `cpu_exception_validation`
 
 ### CpuProtectedModeValidation
 
@@ -124,6 +129,10 @@ Expected visible result:
 
 - `cpu pm validation PASS`
 
+Diagnostics evidence:
+
+- `cpu_pm_validation`
+
 ### CpuExceptionValidation
 
 Intended to verify:
@@ -137,6 +146,10 @@ Expected visible result:
 
 - `cpu exception validation PASS`
 
+Diagnostics evidence:
+
+- `cpu_exception_validation`
+
 ## Pass / Fail Acceptance
 
 ### Pass
@@ -144,6 +157,7 @@ Expected visible result:
 The CPU subsystem passes the current phase when:
 
 - the bundled guest-visible CPU validation images boot and show their pass strings
+- the boot diagnostics report passing `cpu_pm_validation` and `cpu_exception_validation` results
 - protected-mode bring-up no longer depends on fake host control-flow shortcuts
 - operand-size and address-size behavior match the locked machine contract for the implemented instruction set
 - far control transfers and interrupt returns behave consistently in protected mode
