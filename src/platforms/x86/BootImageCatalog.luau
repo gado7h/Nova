@@ -566,8 +566,12 @@ local function buildProtectedModeStubSource(config, pmOffset, kernelBaseLinear, 
 	local x86 = config.X86 or {}
 	local codeDesc = descriptorWords(kernelBaseLinear, 0x9A, 0x000FFFFF, 0x0C)
 	local dataDesc = descriptorWords(kernelBaseLinear, 0x92, 0x000FFFFF, 0x0C)
-	local videoDesc =
-		descriptorWords(x86.VIDEO_BASE or 0xB8000, 0x92, math.max(0, (x86.VIDEO_SIZE or 0x8000) - 1), 0x04)
+	local videoDesc = descriptorWords(
+		x86.TEXT_BUFFER_BASE or 0xB8000,
+		0x92,
+		math.max(0, (x86.TEXT_BUFFER_SIZE or 0x8000) - 1),
+		0x04
+	)
 	return table.concat({
 		"ORG 0x0000",
 		"START:",
