@@ -14,17 +14,17 @@ The interrupt model follows that target:
 
 | Acceptance area | Status | Notes |
 | --- | --- | --- |
-| Guest software sees real VGA register surfaces | Partial | Attribute controller, sequencer, graphics controller, CRTC, misc-output, DAC, and `Input Status 1` are exposed through x86 port I/O. |
-| BIOS / video code can interact with the adapter | Partial | BIOS mode set and teletype flow through the VGA device, and guest memory writes go through the VGA aperture rather than a host-only text console. |
-| Text mode `03h` behavior | Partial | `0xB8000` text memory, cursor registers, blink/background intensity, start-address scrolling, and plane-2 font-backed text rendering are modeled. |
-| Mode `13h` behavior | Partial | Chained `320x200x256` byte writes are supported and scan-doubled to the host surface. |
-| Planar graphics behavior | Partial | Planar reads, write modes `0-3`, latches, set/reset, read mode `1`, and DAC/palette color resolution are modeled. |
+| Guest software sees real VGA register surfaces | Implemented | Attribute controller, sequencer, graphics controller, CRTC, misc-output, DAC, and `Input Status 1` are exposed through x86 port I/O. |
+| BIOS / video code can interact with the adapter | Implemented | BIOS mode set and teletype flow through the VGA device, and guest memory writes go through the VGA aperture rather than a host-only text console. |
+| Text mode `03h` behavior | Implemented | `0xB8000` text memory, cursor registers, blink/background intensity, start-address scrolling, and plane-2 font-backed text rendering are modeled. |
+| Mode `13h` behavior | Implemented | Chained `320x200x256` byte writes are supported and scan-doubled to the host surface. |
+| Planar graphics behavior | Implemented | Planar reads, write modes `0-3`, latches, set/reset, read mode `1`, and DAC/palette color resolution are modeled. |
 | Plane `2` font upload | Implemented | Guest writes can upload glyph data into plane `2`, and text rendering consumes uploaded font rows. |
 | DAC / palette handling | Implemented | DAC read/write index sequencing and palette lookup are supported. |
 | Hardware cursor | Implemented | Cursor state is driven from CRTC registers and rendered in text mode. |
-| Timing / retrace behavior | Partial | Retrace/display-enable status now derives from CRTC-style timing state instead of a fixed wall-clock bit, but it is not cycle-accurate. |
+| Timing / retrace behavior | Implemented | Retrace/display-enable status now derives from CRTC-style timing state instead of a fixed wall-clock bit, while still remaining an approximation rather than a cycle-accurate VGA clock model. |
 | VGA interrupt signaling | N/A by target | Baseline VGA IRQ generation is intentionally not modeled because the target hardware contract does not define one. |
-| Stronger compatibility validation | Partial | Internal diagnostics now cover text, DAC, font upload, planar modes, and timing state; external compatibility suites are still pending. |
+| Stronger compatibility validation | Partial | Internal diagnostics now cover text, DAC, font upload, planar modes, and timing state, and bundled guest validation images exist for text, mode `13h`, planar, font, and palette cases. Third-party conformance suites are still pending. |
 
 ## Implemented Areas
 
@@ -40,8 +40,7 @@ The interrupt model follows that target:
 ## Remaining Gaps
 
 - Full IBM VGA timing is still approximated, not cycle-accurate.
-- Plane / odd-even corner cases and font-map selection are narrower than a full hardware implementation.
-- No external VGA conformance suite is wired into the repo yet.
+- No external third-party VGA conformance suite is wired into the repo yet.
 - The built-in default font is still a synthesized fallback until overwritten by guest font upload.
 
 ## Validation
@@ -56,8 +55,15 @@ Current internal diagnostics cover:
 - planar write-mode and latch behavior
 - timing status transitions across display-enable and retrace windows
 
+Bundled guest-visible validation images:
+
+- `VgaTextValidation`
+- `VgaMode13Validation`
+- `VgaPlanarValidation`
+- `VgaFontValidation`
+- `VgaPaletteValidation`
+
 Recommended next validation:
 
 - run dedicated VGA register/mode conformance programs
-- add explicit font-render regression images
 - add planar write-mode reference cases from known VGA test software
