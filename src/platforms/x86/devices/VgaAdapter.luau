@@ -1163,10 +1163,8 @@ local function planarWrite(self, apertureOffset, value)
 				source = applyRasterOp(logicalOp, source, latch)
 			end
 
-			self._planes[plane][offset] = bit32.bor(
-				bit32.band(source, writeMask),
-				bit32.band(latch, bit32.band(bit32.bnot(writeMask), 0xFF))
-			)
+			self._planes[plane][offset] =
+				bit32.bor(bit32.band(source, writeMask), bit32.band(latch, bit32.band(bit32.bnot(writeMask), 0xFF)))
 		end
 	end
 end
@@ -1305,7 +1303,7 @@ function VgaAdapter:_renderHardwareText()
 				end
 			end
 
-			local drawCursor = (not cursorDisabled)
+			local drawCursor = not cursorDisabled
 				and self._cursorVisible
 				and col == self._cursorCol
 				and row == self._cursorRow
@@ -1578,7 +1576,8 @@ function VgaAdapter:attachBus(bus)
 	bus:registerPort(self.config.PORT.VGA_INPUT_STATUS1, function()
 		self._attrFlipFlop = false
 		updateTimingState(self)
-		self._status1 = (self._timing.inVerticalRetrace and 0x08 or 0x00) + (self._timing.inDisplayEnable and 0x00 or 0x01)
+		self._status1 = (self._timing.inVerticalRetrace and 0x08 or 0x00)
+			+ (self._timing.inDisplayEnable and 0x00 or 0x01)
 		return self._status1
 	end, nil, "VGA Input Status 1")
 end
@@ -1587,7 +1586,11 @@ function VgaAdapter:memRead(offset)
 	self.stats.vramReads = self.stats.vramReads + 1
 	local address = (tonumber(offset) or 0) % self._apertureSize
 	local apertureOffset = decodeWindow(self, address)
-	if isTextState(self) and address >= self._textBaseOffset and address < self._textBaseOffset + self._textByteCount then
+	if
+		isTextState(self)
+		and address >= self._textBaseOffset
+		and address < self._textBaseOffset + self._textByteCount
+	then
 		local textOffset = address - self._textBaseOffset
 		local cellIdx = math.floor(textOffset / 2) % math.max(1, self._textCellCount)
 		if textOffset % 2 == 0 then
@@ -1612,7 +1615,11 @@ function VgaAdapter:memWrite(offset, value)
 	local address = (tonumber(offset) or 0) % self._apertureSize
 	local byteValue = (tonumber(value) or 0) % 256
 
-	if isTextState(self) and address >= self._textBaseOffset and address < self._textBaseOffset + self._textByteCount then
+	if
+		isTextState(self)
+		and address >= self._textBaseOffset
+		and address < self._textBaseOffset + self._textByteCount
+	then
 		local textOffset = address - self._textBaseOffset
 		local cellIdx = math.floor(textOffset / 2) % math.max(1, self._textCellCount)
 		if textOffset % 2 == 0 then
@@ -1672,12 +1679,7 @@ function VgaAdapter:putChar(col, row, ch, attr)
 		return
 	end
 	local idx = (textStartCell(self) + (row * self.config.TEXT_COLS) + col) % math.max(1, self._textCellCount)
-	setTextCell(
-		self,
-		idx,
-		(type(ch) == "string") and string.byte(ch, 1) or ch,
-		attr or 0x07
-	)
+	setTextCell(self, idx, (type(ch) == "string") and string.byte(ch, 1) or ch, attr or 0x07)
 	self.stats.textWrites = self.stats.textWrites + 1
 	self._dirty = true
 end

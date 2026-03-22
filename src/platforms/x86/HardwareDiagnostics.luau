@@ -261,7 +261,7 @@ end
 local function testVGAFontPlane(machine, config)
 	local bus = machine.bus
 	local gpu = machine.gpu
-	local graphicsBase = ((config.X86 or {}).VIDEO_BASE) or config.VRAM_BASE or 0xA0000
+	local graphicsBase = (config.X86 or {}).VIDEO_BASE or config.VRAM_BASE or 0xA0000
 	local busStats = copyStats(bus)
 	local gpuStats = copyStats(gpu)
 	local savedGraphics = deepCopy(gpu._graphics)
@@ -306,13 +306,14 @@ local function testVGAFontPlane(machine, config)
 			break
 		end
 	end
-	return passed, string.format("font_plane_char=%d row0=%s row1=%s", targetChar, formatHex(uploaded[0]), formatHex(uploaded[1]))
+	return passed,
+		string.format("font_plane_char=%d row0=%s row1=%s", targetChar, formatHex(uploaded[0]), formatHex(uploaded[1]))
 end
 
 local function testVGAPlanar(machine, config)
 	local bus = machine.bus
 	local gpu = machine.gpu
-	local graphicsBase = ((config.X86 or {}).VIDEO_BASE) or config.VRAM_BASE or 0xA0000
+	local graphicsBase = (config.X86 or {}).VIDEO_BASE or config.VRAM_BASE or 0xA0000
 	local busStats = copyStats(bus)
 	local gpuStats = copyStats(gpu)
 	local savedGraphics = deepCopy(gpu._graphics)
