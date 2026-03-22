@@ -32,6 +32,7 @@ The intended software environment is a narrow, early-PC-compatible machine suita
 - port-mapped ISA-era peripherals
 - text mode and standard VGA graphics programming
 - protected-mode `80386` execution
+- TSS-backed ring transitions for interrupt and IRET flows used by the validation harness
 - timing behavior that is stable enough for real guest software to poll and use
 
 ### Explicitly Out of Scope
@@ -43,6 +44,7 @@ The intended software environment is a narrow, early-PC-compatible machine suita
 - modern chipsets and buses
 - cycle-perfect analog VGA timing
 - exact board-vendor quirks outside the locked baseline target
+- full hardware task switching / TSS task switching
 
 ## What "Faithful" Means
 
@@ -54,6 +56,20 @@ For this project, a subsystem is considered faithful when it is:
 - timing-correct enough for real software
 
 Machina is **not** targeting cycle-perfect analog hardware recreation. The acceptance bar is software-visible correctness for the locked target machine, not transistor-accurate reconstruction.
+
+## Validation Contract
+
+Guest-visible validation evidence is defined in [docs/VALIDATION.md](./VALIDATION.md).
+
+`HardwareDiagnostics.runReviewSuite()` is the canonical review entry point for this target. It combines:
+
+- base device smoke diagnostics
+- reset vector validation
+- BIOS boot validation
+- interrupt integration validation
+- protected-mode CPU validation
+- exception validation
+- privilege-transition validation
 
 ### Register-Correct
 
@@ -155,6 +171,8 @@ Passing a subsystem means the required items are implemented and verified agains
 - stack behavior in real and protected mode
 - control-register behavior needed for the target
 - fault/exception behavior for the implemented instruction set
+- protected-mode interrupt and IRET control flow used by the validation harness
+- TSS-backed stack switching for the privilege-transition validation path
 
 #### Pass / Fail Acceptance
 
@@ -163,6 +181,7 @@ Pass when:
 - BIOS boot code runs from reset vector without host shortcuts
 - protected-mode test images can enter protected mode, run, and return/interrupt correctly
 - real-mode and protected-mode interrupt handlers execute through CPU state changes that match the target contract
+- privilege-sensitive gate and IRET control flow behaves as expected for the locked target
 - implemented opcodes behave correctly for width, flags, and addressing mode
 
 Fail when:
@@ -170,6 +189,7 @@ Fail when:
 - protected-mode execution still depends on host-side shortcuts instead of CPU state transitions
 - address-size or operand-size prefixes produce incorrect guest-visible execution
 - interrupts or exceptions bypass the modeled CPU contract
+- privilege-sensitive control flow silently falls back to host-only behavior
 
 ### BIOS
 
